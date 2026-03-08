@@ -1,4 +1,4 @@
-"""TruthShield – FastAPI Backend
+"""TruthShield – Enhanced FastAPI Backend
 
 Run:  uvicorn main:app --reload --port 8000
 """
@@ -6,16 +6,16 @@ Run:  uvicorn main:app --reload --port 8000
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from typing import Optional
 
 from analyzer import analyze_text
 
 app = FastAPI(
     title="TruthShield API",
-    version="1.0.0",
-    description="Explainable AI API for detecting scams, AI-generated content, and manipulation.",
+    version="2.0.0",
+    description="Explainable AI API for detecting scams, AI-generated content, and manipulation with India-specific intelligence.",
 )
 
-# Allow requests from Chrome extension and local dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,10 +24,10 @@ app.add_middleware(
 )
 
 
-# ── Request / Response schemas ─────────────────────────────────────────────────
+# ── Schemas ────────────────────────────────────────────────────────────────────
 
 class AnalyzeRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=10000, description="Text to analyze")
+    text: str = Field(..., min_length=1, max_length=10000)
 
 
 class SignalsResponse(BaseModel):
@@ -36,24 +36,34 @@ class SignalsResponse(BaseModel):
     emotional_manipulation: int
 
 
+class ExplanationResponse(BaseModel):
+    category: str
+    phrase: str
+    reason: str
+    severity: str
+
+
 class AnalyzeResponse(BaseModel):
     risk_score: int
     classification: str
     signals: SignalsResponse
     suspicious_phrases: list[str]
     highlighted_text: str
+    explanations: list[ExplanationResponse]
+    summary: str
+    tips: list[str]
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "TruthShield API"}
+    return {"status": "ok", "service": "TruthShield API", "version": "2.0.0"}
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
-    """Analyze text for scam indicators, AI patterns, and emotional manipulation."""
+    """Analyze text for scam indicators, AI patterns, emotional manipulation, and India-specific fraud."""
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text must not be empty")
@@ -66,9 +76,12 @@ def analyze(req: AnalyzeRequest):
         signals=SignalsResponse(**result.signals),
         suspicious_phrases=result.suspicious_phrases,
         highlighted_text=result.highlighted_text,
+        explanations=[ExplanationResponse(**e) for e in result.explanations],
+        summary=result.summary,
+        tips=result.tips,
     )
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": "2.0.0"}
