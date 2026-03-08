@@ -233,20 +233,35 @@ function analyzeTextLocally(text) {
   const ai = findMatches(AI_PATTERNS, "ai");
   const india = findMatches(INDIA_SCAM_PATTERNS, "india_scam");
 
-  // Stylometric analysis
+  const FINANCIAL_PHRASES = [
+    "bank account", "wire transfer", "send money", "processing fee", "credit card",
+    "debit card", "social security", "western union", "money gram", "bitcoin",
+    "cryptocurrency", "investment opportunity", "double your money", "gift card",
+    "upi", "paytm", "phonepe", "google pay", "sbi", "hdfc", "icici",
+    "aadhaar", "pan card", "otp", "share otp", "kyc update",
+  ];
+
+  const allScamHits = [...scam.hits, ...india.hits];
+  const financialHits = allScamHits.filter(h => FINANCIAL_PHRASES.includes(h));
+  const regularScamHits = allScamHits.filter(h => !FINANCIAL_PHRASES.includes(h));
+
+  const scamPoints = regularScamHits.length * 15 + financialHits.length * 20;
+  const urgencyPoints = urgency.hits.length * 10;
+
   const stylo = analyzeStylometry(text);
-
-  const scamScore = Math.min(100, [...scam.hits, ...india.hits].length * 14);
-  const emoScore = Math.min(100, urgency.hits.length * 18);
   const aiScore = Math.min(100, ai.hits.length * 16 + stylo.score);
-  const riskScore = Math.min(100, Math.round(aiScore * 0.3 + scamScore * 0.4 + emoScore * 0.3));
 
-  const classification = riskScore < 30 ? "Safe" : riskScore < 65 ? "Suspicious" : "High Risk";
+  const rawScore = scamPoints + urgencyPoints + Math.round(aiScore * 0.3);
+  const riskScore = Math.max(0, Math.min(100, rawScore));
+
+  const scamSignal = Math.min(100, scamPoints);
+  const emoSignal = Math.min(100, urgencyPoints);
+
+  const classification = riskScore <= 30 ? "Safe" : riskScore <= 60 ? "Suspicious" : "High Risk";
 
   const allSuspicious = [...new Set([...scam.hits, ...urgency.hits, ...ai.hits, ...india.hits])];
   const allExplanations = [...scam.explanations, ...urgency.explanations, ...ai.explanations, ...india.explanations];
 
-  // Add stylometric explanations
   stylo.indicators.forEach(ind => {
     allExplanations.push({ category: "ai", phrase: "(stylometric)", reason: ind, severity: "medium" });
   });
@@ -262,9 +277,9 @@ function analyzeTextLocally(text) {
     summary = "This content appears safe. No significant scam or manipulation indicators detected.";
   } else {
     const parts = [];
-    if (scamScore > 30) parts.push("scam keywords");
+    if (scamSignal > 30) parts.push("scam keywords");
     if (aiScore > 30) parts.push("AI-generated patterns");
-    if (emoScore > 30) parts.push("emotional manipulation");
+    if (emoSignal > 30) parts.push("emotional manipulation");
     if (india.hits.length > 0) parts.push("India-specific fraud patterns");
     summary = classification === "High Risk"
       ? `⚠️ HIGH RISK: Contains ${parts.join(", ")}. Do NOT share personal info or transfer money.`
@@ -289,7 +304,7 @@ function analyzeTextLocally(text) {
   return {
     risk_score: riskScore,
     classification,
-    signals: { ai_generated: aiScore, scam_keywords: scamScore, emotional_manipulation: emoScore },
+    signals: { ai_generated: aiScore, scam_keywords: scamSignal, emotional_manipulation: emoSignal },
     highlighted_text: highlightedText,
     suspicious_phrases: allSuspicious,
     explanations: allExplanations,

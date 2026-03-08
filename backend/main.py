@@ -1,18 +1,18 @@
-"""TruthShield – Enhanced FastAPI Backend
+"""TruthShield – Enhanced FastAPI Backend v3.0
 
 Run:  uvicorn main:app --reload --port 8000
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
 
-from analyzer import analyze_text
+from analyzer import analyze_text, analyze_image
 
 app = FastAPI(
     title="TruthShield API",
-    version="2.0.0",
+    version="3.0.0",
     description="Explainable AI API for detecting scams, AI-generated content, and manipulation with India-specific intelligence.",
 )
 
@@ -54,11 +54,26 @@ class AnalyzeResponse(BaseModel):
     tips: list[str]
 
 
+class ImageExplanation(BaseModel):
+    signal: str
+    weight: int
+    type: str
+
+
+class ImageAnalyzeResponse(BaseModel):
+    ai_generated_probability: float
+    classification: str
+    explanation: list[ImageExplanation]
+    risk_score: int
+    metadata: dict
+    tips: list[str]
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "TruthShield API", "version": "2.0.0"}
+    return {"status": "ok", "service": "TruthShield API", "version": "3.0.0"}
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -82,6 +97,28 @@ def analyze(req: AnalyzeRequest):
     )
 
 
+@app.post("/analyze-image", response_model=ImageAnalyzeResponse)
+async def analyze_image_endpoint(file: UploadFile = File(...)):
+    """Analyze an uploaded image for AI-generation indicators."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+
+    result = analyze_image(image_data, filename=file.filename or "", content_type=file.content_type or "")
+
+    return ImageAnalyzeResponse(
+        ai_generated_probability=result.ai_generated_probability,
+        classification=result.classification,
+        explanation=[ImageExplanation(**e) for e in result.explanation],
+        risk_score=result.risk_score,
+        metadata=result.metadata,
+        tips=result.tips,
+    )
+
+
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "2.0.0"}
+    return {"status": "healthy", "version": "3.0.0"}
