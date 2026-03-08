@@ -9,7 +9,7 @@
 
     /* ── Default (Dark) Theme ── */
     body {
-      width: 400px;
+      width: 420px;
       min-height: 200px;
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
       background: #0f1117;
@@ -24,7 +24,7 @@
       color: #1a1a1a;
       font-size: 16px;
       line-height: 1.7;
-      width: 440px;
+      width: 460px;
     }
     body.senior-mode .header h1 {
       font-size: 22px;
@@ -44,6 +44,7 @@
     body.senior-mode mark { background: #fecaca; color: #991b1b; }
     body.senior-mode .score-circle { width: 90px; height: 90px; font-size: 32px; border-width: 5px; }
     body.senior-mode .toggle-row label { font-size: 14px; }
+    body.senior-mode .meta-item { font-size: 15px; }
 
     /* ── Components ── */
     .header {
@@ -112,6 +113,7 @@
       border: 4px solid #27272a;
       display: flex; align-items: center; justify-content: center;
       margin: 0 auto 10px; font-size: 28px; font-weight: 700;
+      transition: all 0.4s ease;
     }
     .score-circle.safe { border-color: #22c55e; color: #22c55e; }
     .score-circle.suspicious { border-color: #eab308; color: #eab308; }
@@ -125,6 +127,17 @@
     .classification.safe { color: #22c55e; }
     .classification.suspicious { color: #eab308; }
     .classification.high-risk { color: #ef4444; }
+
+    .type-badge {
+      display: none;
+      font-size: 10px; padding: 2px 8px;
+      border-radius: 4px; font-weight: 600;
+      text-align: center; margin: 0 auto 8px; width: fit-content;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .type-badge.text { background: #3b82f620; color: #60a5fa; }
+    .type-badge.image { background: #a855f720; color: #c084fc; }
+    .type-badge.url { background: #22d3ee20; color: #22d3ee; }
 
     .card h3 {
       font-size: 11px; text-transform: uppercase;
@@ -170,6 +183,7 @@
     .explanation-item.scam, .explanation-item.india_scam { background: #ef444415; border-left: 3px solid #ef4444; }
     .explanation-item.urgency { background: #eab30815; border-left: 3px solid #eab308; }
     .explanation-item.ai { background: #3b82f615; border-left: 3px solid #3b82f6; }
+    .explanation-item.safe-indicator { background: #22c55e15; border-left: 3px solid #22c55e; }
     .explanation-item .phrase { font-family: monospace; font-size: 11px; color: #a1a1aa; }
     .explanation-item .reason { margin-top: 4px; color: #a1a1aa; line-height: 1.5; }
     body.senior-mode .explanation-item .reason { color: #555; }
@@ -223,13 +237,57 @@
     }
     .btn-clear:hover { background: #3f3f46; }
     body.senior-mode .btn-clear { background: #e5e5e5; color: #333; border-color: #d4d4d4; font-size: 14px; padding: 10px; }
+
+    /* Meta items (readability, metadata, language) */
+    .meta-container {
+      margin-top: 8px;
+    }
+    .meta-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 4px 0; font-size: 12px; color: #a1a1aa;
+      border-bottom: 1px solid #27272a10;
+    }
+    body.senior-mode .meta-item { color: #555; border-color: #e5e5e510; }
+    .meta-value { font-family: 'Segoe UI', monospace; font-weight: 600; color: #e4e4e7; }
+    body.senior-mode .meta-value { color: #1a1a1a; }
+
+    /* URL analysis */
+    .url-item {
+      padding: 6px 8px; margin-bottom: 4px;
+      border-radius: 6px; font-size: 11px;
+    }
+    .url-item.safe { background: #22c55e10; border-left: 3px solid #22c55e; }
+    .url-item.danger { background: #ef444410; border-left: 3px solid #ef4444; }
+    .url-text { font-family: monospace; word-break: break-all; margin-bottom: 2px; }
+    .url-score { font-weight: 600; margin-bottom: 2px; }
+    .url-flag { color: #a1a1aa; font-size: 10px; padding-left: 8px; }
+    .url-flag::before { content: '• '; }
+
+    /* Feature list (idle state) */
+    .feature-list {
+      margin-top: 12px; text-align: left;
+    }
+    .feature-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 0; font-size: 11px; color: #71717a;
+    }
+    .feature-icon { font-size: 14px; }
+
+    /* Version badge */
+    .version-badge {
+      display: inline-block;
+      font-size: 9px; padding: 1px 6px;
+      border-radius: 3px; background: #3b82f620;
+      color: #60a5fa; margin-left: 6px;
+      font-weight: 600;
+    }
   </style>
 </head>
 <body>
   <div class="header">
     <div class="header-left">
       <div class="shield-icon">🛡️</div>
-      <h1>TruthShield</h1>
+      <h1>TruthShield <span class="version-badge">v2.1</span></h1>
     </div>
     <div class="toggle-row">
       <label>👴 Senior</label>
@@ -241,9 +299,17 @@
   </div>
 
   <div id="status" class="card" style="text-align:center;">
-    <p class="idle-msg" id="idle-msg">Highlight text on any webpage, right-click, and select <strong>"Analyze with TruthShield"</strong> to begin.</p>
+    <p class="idle-msg" id="idle-msg">
+      Right-click on any webpage to analyze:
+      <div class="feature-list">
+        <div class="feature-item"><span class="feature-icon">📝</span> Select text → "Analyze Text with TruthShield"</div>
+        <div class="feature-item"><span class="feature-icon">🖼️</span> Right-click image → "Check if AI-Generated"</div>
+        <div class="feature-item"><span class="feature-icon">🔗</span> Right-click link → "Check Link Safety"</div>
+      </div>
+    </p>
     <div id="loading" style="display:none;"><div class="spinner"></div><p style="font-size:12px;color:#71717a;">Analyzing...</p></div>
     <div id="result" style="display:none;">
+      <div id="analysis-type-badge" class="type-badge" style="display:none;"></div>
       <div class="score-circle" id="score-circle">--</div>
       <div class="classification" id="classification">--</div>
       <div id="senior-verdict" style="display:none;font-size:15px;font-weight:600;margin-top:6px;"></div>
@@ -257,10 +323,11 @@
       <button class="tab-btn" data-tab="explain">Why?</button>
       <button class="tab-btn" data-tab="highlights">Flagged</button>
       <button class="tab-btn" data-tab="tips">Tips</button>
+      <button class="tab-btn" data-tab="meta">Info</button>
     </div>
 
     <div class="tab-content active" id="tab-signals">
-      <div class="card">
+      <div class="card" id="tab-signals-content">
         <h3>Risk Signals</h3>
         <div class="signal"><span>🤖 AI Generated</span><div class="signal-bar"><div class="signal-fill" id="ai-bar" style="width:0%"></div></div></div>
         <div class="signal"><span>🎣 Scam Keywords</span><div class="signal-bar"><div class="signal-fill" id="scam-bar" style="width:0%"></div></div></div>
@@ -284,6 +351,15 @@
       <div class="card">
         <h3>Safety Tips</h3>
         <div id="tips-container"></div>
+      </div>
+    </div>
+
+    <div class="tab-content" id="tab-meta">
+      <div class="card">
+        <h3>Content Metadata</h3>
+        <div id="readability-container" class="meta-container" style="display:none;"></div>
+        <div id="language-container" class="meta-container" style="display:none;"></div>
+        <div id="url-analysis-container" class="meta-container" style="display:none;"></div>
       </div>
     </div>
   </div>
