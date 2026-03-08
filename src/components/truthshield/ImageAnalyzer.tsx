@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ImageIcon, Upload, Loader2, RotateCcw, ExternalLink } from "lucide-react";
 import { analyzeImage, type ImageAnalysisResult } from "@/lib/analyzer";
 import { addToHistory } from "./AnalysisHistory";
+import { recordAnalysis } from "@/lib/analysisStore";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
 import RiskGauge from "./RiskGauge";
 import { Button } from "@/components/ui/button";
