@@ -16,7 +16,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (!text) return;
 
     chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null });
-    try { chrome.runtime.sendMessage({ type: "analysis_start" }); } catch (_) {}
+    chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
 
     let result;
     try {
