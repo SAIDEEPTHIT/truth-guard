@@ -531,8 +531,19 @@ export function analyzeText(text: string): AnalysisResult {
   const ai = findMatches(lower, AI_PATTERNS, "ai");
   const india = findMatches(lower, INDIA_SCAM_PATTERNS, "india_scam");
 
-  const scamScore = scoreFromHits([...scam.hits, ...india.hits], 14);
-  const emoScore = scoreFromHits(urgency.hits, 18);
+  // New weighted scoring
+  const allScamHits = [...scam.hits, ...india.hits];
+  const financialHits = allScamHits.filter(h => FINANCIAL_PHRASES.includes(h));
+  const regularScamHits = allScamHits.filter(h => !FINANCIAL_PHRASES.includes(h));
+
+  const scamPoints = regularScamHits.length * SCAM_WEIGHT + financialHits.length * FINANCIAL_WEIGHT;
+  const urgencyPoints = urgency.hits.length * URGENCY_WEIGHT;
+
+  // URL analysis & scoring
+  const urls = extractURLs(text);
+  const url_analysis = urls.map(u => analyzeURL(u));
+  const suspiciousLinks = url_analysis.filter(u => !u.safe);
+  const linkPoints = suspiciousLinks.length * LINK_WEIGHT;
 
   const stylometry = analyzeStylometry(text);
   const aiBaseScore = scoreFromHits(ai.hits, 16);
@@ -545,10 +556,15 @@ export function analyzeText(text: string): AnalysisResult {
     severity: "medium" as const,
   }));
 
-  const riskScore = Math.min(100, Math.round(aiScore * 0.3 + scamScore * 0.4 + emoScore * 0.3));
+  // Final risk = sum of all points, clamped 0-100
+  const rawScore = scamPoints + urgencyPoints + linkPoints + Math.round(aiScore * 0.3);
+  const riskScore = Math.max(0, Math.min(100, rawScore));
+
+  const scamSignal = Math.min(100, scamPoints);
+  const emoSignal = Math.min(100, urgencyPoints);
 
   const classification: AnalysisResult["classification"] =
-    riskScore < 30 ? "Safe" : riskScore < 65 ? "Suspicious" : "High Risk";
+    riskScore <= 30 ? "Safe" : riskScore <= 60 ? "Suspicious" : "High Risk";
 
   const allPhrases = [...new Set([...scam.hits, ...urgency.hits, ...ai.hits, ...india.hits])];
   const allExplanations = [...scam.explanations, ...urgency.explanations, ...ai.explanations, ...india.explanations, ...stylometryExplanations];
@@ -556,21 +572,13 @@ export function analyzeText(text: string): AnalysisResult {
 
   const signals: AnalysisSignals = {
     ai_generated: aiScore,
-    scam_keywords: scamScore,
-    emotional_manipulation: emoScore,
+    scam_keywords: scamSignal,
+    emotional_manipulation: emoSignal,
   };
 
-  // Readability
   const readability = analyzeReadability(text);
-
-  // Language detection
   const language = detectLanguage(text);
 
-  // URL analysis
-  const urls = extractURLs(text);
-  const url_analysis = urls.map(u => analyzeURL(u));
-
-  // Confidence: higher when more indicators are found
   const totalIndicators = allExplanations.length;
   const confidence = totalIndicators === 0
     ? (classification === "Safe" ? 85 : 50)
