@@ -16,7 +16,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (!text) return;
 
     chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null });
-    try { chrome.runtime.sendMessage({ type: "analysis_start" }); } catch (_) {}
+    chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
 
     let result;
     try {
@@ -39,7 +39,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     chrome.action.setBadgeText({ text: String(result.risk_score) });
     chrome.action.setBadgeBackgroundColor({ color: badgeColor });
 
-    try { chrome.runtime.sendMessage({ type: "analysis_result", data: result }); } catch (_) {}
+    chrome.runtime.sendMessage({ type: "analysis_result", data: result }).catch(() => {});
   }
 });
 
