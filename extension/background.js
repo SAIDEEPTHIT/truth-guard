@@ -1,6 +1,6 @@
 // TruthShield Background Service Worker (Manifest V3)
 
-const API_URL = "http://localhost:8000"; // Change to your deployed backend URL
+const API_URL = "https://truth-guard-1.onrender.com"; // Render deployed backend
 
 // Create context menu on install
 chrome.runtime.onInstalled.addListener(() => {
