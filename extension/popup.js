@@ -1,26 +1,27 @@
 // TruthShield Popup Script
 
-const API_URL = "http://localhost:8000"; // Change to your deployed backend URL
-
 document.addEventListener("DOMContentLoaded", () => {
-  // Check if there's stored analysis result
-  chrome.storage.local.get(["truthshield_result"], (data) => {
-    if (data.truthshield_result) {
+  // Load stored state on popup open
+  chrome.storage.local.get(["truthshield_result", "truthshield_loading"], (data) => {
+    if (data.truthshield_loading) {
+      showLoading();
+    } else if (data.truthshield_result) {
       renderResult(data.truthshield_result);
     }
   });
 
-  // Listen for new results
+  // Listen for live updates while popup is open
   chrome.runtime.onMessage.addListener((message) => {
-    if (message.type === "analysis_start") {
-      showLoading();
-    }
-    if (message.type === "analysis_result") {
-      renderResult(message.data);
-    }
-    if (message.type === "analysis_error") {
-      showError(message.error);
-    }
+    if (message.type === "analysis_start") showLoading();
+    if (message.type === "analysis_result") renderResult(message.data);
+    if (message.type === "analysis_error") showError(message.error);
+  });
+
+  // Clear button
+  document.getElementById("clear-btn").addEventListener("click", () => {
+    chrome.storage.local.remove(["truthshield_result", "truthshield_loading"]);
+    chrome.action.setBadgeText({ text: "" });
+    resetUI();
   });
 });
 
@@ -31,6 +32,7 @@ function showLoading() {
   document.getElementById("error-msg").style.display = "none";
   document.getElementById("details-section").style.display = "none";
   document.getElementById("highlights-section").style.display = "none";
+  document.getElementById("clear-btn").style.display = "none";
   document.getElementById("status").className = "status idle";
 }
 
@@ -40,15 +42,27 @@ function showError(msg) {
   document.getElementById("error-msg").style.display = "block";
 }
 
+function resetUI() {
+  document.getElementById("idle-msg").style.display = "block";
+  document.getElementById("loading").style.display = "none";
+  document.getElementById("result").style.display = "none";
+  document.getElementById("error-msg").style.display = "none";
+  document.getElementById("details-section").style.display = "none";
+  document.getElementById("highlights-section").style.display = "none";
+  document.getElementById("clear-btn").style.display = "none";
+  document.getElementById("status").className = "status idle";
+}
+
 function renderResult(data) {
-  const { risk_score, classification, signals, highlighted_text, suspicious_phrases } = data;
+  const { risk_score, classification, signals, highlighted_text } = data;
 
   document.getElementById("idle-msg").style.display = "none";
   document.getElementById("loading").style.display = "none";
   document.getElementById("result").style.display = "block";
   document.getElementById("error-msg").style.display = "none";
+  document.getElementById("clear-btn").style.display = "inline-block";
 
-  // Score
+  // Score circle
   const scoreEl = document.getElementById("score-circle");
   scoreEl.textContent = risk_score;
 
@@ -64,15 +78,13 @@ function renderResult(data) {
   classEl.textContent = classification;
   statusEl.className = `status ${riskClass}`;
 
-  // Signals
-  const detailsEl = document.getElementById("details-section");
-  detailsEl.style.display = "block";
-
+  // Signal bars
+  document.getElementById("details-section").style.display = "block";
   setBar("ai-bar", signals.ai_generated);
   setBar("scam-bar", signals.scam_keywords);
   setBar("emo-bar", signals.emotional_manipulation);
 
-  // Highlights
+  // Highlighted text
   if (highlighted_text) {
     document.getElementById("highlights-section").style.display = "block";
     document.getElementById("highlighted-text").innerHTML = highlighted_text;
