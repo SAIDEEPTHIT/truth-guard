@@ -193,6 +193,20 @@ const INDIA_SCAM_PATTERNS: { phrase: string; reason: string; severity: "low" | "
 
 // ── Helper Functions ──
 
+// Weight constants for scoring
+const SCAM_WEIGHT = 15;
+const URGENCY_WEIGHT = 10;
+const FINANCIAL_WEIGHT = 20;
+const LINK_WEIGHT = 25;
+
+const FINANCIAL_PHRASES = [
+  "bank account", "wire transfer", "send money", "processing fee", "credit card",
+  "debit card", "social security", "western union", "money gram", "bitcoin",
+  "cryptocurrency", "investment opportunity", "double your money", "gift card",
+  "upi", "paytm", "phonepe", "google pay", "sbi", "hdfc", "icici",
+  "aadhaar", "pan card", "otp", "share otp", "kyc update",
+];
+
 function findMatches(
   textLower: string,
   bank: { phrase: string; reason: string; severity: "low" | "medium" | "high" }[],
