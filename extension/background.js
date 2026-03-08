@@ -373,19 +373,51 @@ async function analyzeImageFromURL(imageUrl) {
 
   metadata["Source URL"] = imageUrl.length > 80 ? imageUrl.substring(0, 77) + "..." : imageUrl;
 
+  // Try backend first
+  try {
+    const formData = new FormData();
+    const response = await fetch(imageUrl);
+    const blob = await response.blob();
+    formData.append("file", blob, "image.jpg");
+
+    const apiRes = await fetch(`${API_URL}/analyze-image`, {
+      method: "POST",
+      body: formData,
+    });
+    if (apiRes.ok) {
+      const apiResult = await apiRes.json();
+      return {
+        risk_score: apiResult.risk_score,
+        classification: apiResult.classification,
+        indicators: apiResult.explanation.map(e => e.signal),
+        metadata: apiResult.metadata,
+        tips: apiResult.tips,
+        type: "image",
+      };
+    }
+  } catch (e) {
+    // Fall through to local analysis
+  }
+
+  // Local heuristic fallback
   try {
     const response = await fetch(imageUrl);
     const blob = await response.blob();
     metadata["File Size"] = (blob.size / 1024).toFixed(1) + " KB";
     metadata["MIME Type"] = blob.type || "unknown";
 
-    // Check size — very small images are suspicious
-    if (blob.size < 50 * 1024) {
-      score += 5;
-      indicators.push("Small file size — may be AI-generated thumbnail.");
+    if (blob.size > 5 * 1024 * 1024) {
+      score -= 5;
+      indicators.push("✅ Large file size — uncommon for AI images.");
+    } else if (blob.size < 200 * 1024 && blob.type.includes("jpeg")) {
+      score += 8;
+      indicators.push("Small JPEG — AI outputs are often compressed.");
     }
 
-    // Check for EXIF marker in first 64KB
+    if (blob.type.includes("png")) { score += 5; indicators.push("PNG format — commonly used by AI generators."); }
+    if (blob.type.includes("webp")) { score += 5; indicators.push("WebP format — often used in AI pipelines."); }
+
+    // EXIF check
     const buffer = await blob.slice(0, 65536).arrayBuffer();
     const view = new Uint8Array(buffer);
     let hasExif = false;
@@ -393,98 +425,132 @@ async function analyzeImageFromURL(imageUrl) {
       if (view[i] === 0xFF && view[i + 1] === 0xE1) { hasExif = true; break; }
     }
     if (!hasExif) {
-      score += 12;
-      indicators.push("No EXIF metadata — AI images typically lack camera data.");
+      score += 15;
+      indicators.push("No EXIF metadata — AI images lack camera data.");
     } else {
-      score -= 8;
-      indicators.push("✅ EXIF metadata present — suggests real camera capture.");
+      score -= 15;
+      indicators.push("✅ EXIF metadata present — suggests real camera.");
     }
 
-    // Analyze via offscreen canvas
+    // Pixel analysis
     const imgBitmap = await createImageBitmap(blob);
     metadata["Dimensions"] = `${imgBitmap.width} × ${imgBitmap.height}`;
 
-    // Common AI dimensions
-    const aiDims = [[512,512],[768,768],[1024,1024],[1024,768],[768,1024],[1920,1080],[1344,768],[768,1344]];
+    const aiDims = [[512,512],[768,768],[1024,1024],[1024,768],[768,1024],[1920,1080],[1344,768],[768,1344],[2048,2048],[1536,1536],[896,1152],[1152,896]];
     if (aiDims.some(([w,h]) => imgBitmap.width === w && imgBitmap.height === h)) {
-      score += 15;
-      indicators.push(`Dimensions (${imgBitmap.width}×${imgBitmap.height}) match AI generator output sizes.`);
+      score += 18;
+      indicators.push(`Dimensions (${imgBitmap.width}×${imgBitmap.height}) match AI generator sizes.`);
     }
 
-    // Pixel analysis via OffscreenCanvas
+    if (imgBitmap.width % 64 === 0 && imgBitmap.height % 64 === 0) {
+      score += 10;
+      indicators.push("Dimensions are multiples of 64 — AI model alignment.");
+    }
+
+    if (imgBitmap.width === imgBitmap.height && imgBitmap.width >= 512) {
+      score += 8;
+      indicators.push("Perfect square — common in AI images.");
+    }
+
     const canvas = new OffscreenCanvas(Math.min(imgBitmap.width, 256), Math.min(imgBitmap.height, 256));
     const ctx = canvas.getContext("2d");
     ctx.drawImage(imgBitmap, 0, 0, canvas.width, canvas.height);
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const pixels = imageData.data;
+    const totalPx = canvas.width * canvas.height;
 
-    // Color histogram dominance
+    // Color histogram
     const histogram = new Array(256).fill(0);
     for (let i = 0; i < pixels.length; i += 4) {
       const gray = Math.round(0.299 * pixels[i] + 0.587 * pixels[i+1] + 0.114 * pixels[i+2]);
       histogram[gray]++;
     }
-    const totalPx = canvas.width * canvas.height;
-    const dominance = Math.max(...histogram) / totalPx;
-    if (dominance > 0.15) {
-      score += 10;
-      indicators.push("Unusual color uniformity — may indicate AI generation.");
+    if (Math.max(...histogram) / totalPx > 0.12) {
+      score += 12;
+      indicators.push("Unusual color uniformity.");
     }
 
-    // Smooth gradient check
+    let emptyBins = 0;
+    for (let i = 10; i < 245; i++) { if (histogram[i] === 0) emptyBins++; }
+    if (emptyBins < 15 && totalPx > 10000) {
+      score += 10;
+      indicators.push("Very smooth color distribution — AI images rarely have histogram gaps.");
+    }
+
+    // Smooth transitions
     let smooth = 0, total = 0;
     for (let i = 4; i < pixels.length; i += 4) {
       const diff = Math.abs(pixels[i]-pixels[i-4]) + Math.abs(pixels[i+1]-pixels[i-3]) + Math.abs(pixels[i+2]-pixels[i-2]);
-      if (diff < 10) smooth++;
+      if (diff < 8) smooth++;
       total++;
     }
-    if (total > 0 && smooth/total > 0.7) {
-      score += 12;
-      indicators.push("High smooth color transitions — characteristic of AI imagery.");
+    if (total > 0 && smooth/total > 0.65) {
+      score += 14;
+      indicators.push("High smooth transitions — characteristic of AI imagery.");
     }
 
-    // Edge sharpness analysis
+    // Sharp edges
     let sharpEdges = 0;
     for (let i = 4; i < pixels.length; i += 4) {
       const diff = Math.abs(pixels[i]-pixels[i-4]) + Math.abs(pixels[i+1]-pixels[i-3]) + Math.abs(pixels[i+2]-pixels[i-2]);
-      if (diff > 100) sharpEdges++;
+      if (diff > 80) sharpEdges++;
     }
-    if (total > 0 && sharpEdges/total < 0.02) {
-      score += 8;
-      indicators.push("Very few sharp edges — AI images tend to have smoother boundaries.");
+    if (total > 0 && sharpEdges/total < 0.03) {
+      score += 10;
+      indicators.push("Very few sharp edges — AI has smoother boundaries.");
+    }
+
+    // Channel correlation
+    let meanR = 0, meanG = 0, meanB = 0;
+    for (let i = 0; i < pixels.length; i += 4) { meanR += pixels[i]; meanG += pixels[i+1]; meanB += pixels[i+2]; }
+    meanR /= totalPx; meanG /= totalPx; meanB /= totalPx;
+    let sRG = 0, sR2 = 0, sG2 = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const dr = pixels[i]-meanR, dg = pixels[i+1]-meanG;
+      sRG += dr*dg; sR2 += dr*dr; sG2 += dg*dg;
+    }
+    const corr = sR2 > 0 && sG2 > 0 ? Math.abs(sRG / Math.sqrt(sR2 * sG2)) : 0;
+    if (corr > 0.92) {
+      score += 12;
+      indicators.push("Extremely high color channel correlation — typical of AI.");
+    }
+
+    // Noise uniformity
+    const noiseVals = [];
+    for (let i = 4; i < pixels.length; i += 4) noiseVals.push(Math.abs(pixels[i]-pixels[i-4]));
+    if (noiseVals.length > 100) {
+      const nm = noiseVals.reduce((a,b)=>a+b,0)/noiseVals.length;
+      const nv = noiseVals.reduce((s,v)=>s+Math.pow(v-nm,2),0)/noiseVals.length;
+      if (Math.sqrt(nv) < 5 && nm < 8) {
+        score += 12;
+        indicators.push("Unnaturally uniform noise — hallmark of AI generation.");
+      }
     }
 
   } catch (err) {
     indicators.push("Could not fully analyze image (CORS restriction).");
-    score += 10; // Be cautious
+    score += 10;
   }
 
   // URL pattern check
-  const aiUrlPatterns = /\b(dalle|midjourney|stable.?diffusion|comfyui|generated|ai[_-]|artificial|deepfake)\b/i;
+  const aiUrlPatterns = /\b(dalle|midjourney|stable.?diffusion|comfyui|generated|ai[_-]|artificial|deepfake|flux|leonardo)\b/i;
   if (aiUrlPatterns.test(imageUrl)) {
-    score += 20;
+    score += 25;
     indicators.push("URL contains AI tool references.");
   }
 
   score = Math.max(0, Math.min(100, score));
-  const classification = score < 25 ? "Likely Authentic" : score < 55 ? "Possibly AI-Generated" : "Likely AI-Generated";
+  const classification = score <= 25 ? "Likely Authentic" : score <= 50 ? "Possibly AI-Generated" : "Likely AI-Generated";
 
   const tips = [];
-  if (score >= 25) {
-    tips.push("Right-click the image and use Google Reverse Image Search.");
+  if (score > 25) {
+    tips.push("Use Google Reverse Image Search to verify.");
     tips.push("Look for artifacts: irregular fingers, asymmetric details, blurred text.");
-    tips.push("Check if the source is a verified, credible publisher.");
+    tips.push("Check source credibility.");
   }
-  tips.push("AI image detection is probabilistic — no tool is 100% accurate.");
+  tips.push("AI detection is probabilistic — no tool is 100% accurate.");
 
-  return {
-    risk_score: score,
-    classification,
-    indicators,
-    metadata,
-    tips,
-    type: "image",
-  };
+  return { risk_score: score, classification, indicators, metadata, tips, type: "image" };
 }
 
 // ── URL Safety Analysis ──
