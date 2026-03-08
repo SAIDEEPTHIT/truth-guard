@@ -14,6 +14,7 @@ const Navbar = () => {
     { to: "/analyze", label: "Analyze Text" },
     { to: "/image-analysis", label: "Analyze Image" },
     { to: "/history", label: "History" },
+    { to: "/dashboard", label: "Dashboard" },
   ];
 
   return (

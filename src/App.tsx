@@ -9,6 +9,7 @@ import Index from "./pages/Index";
 import Analyze from "./pages/Analyze";
 import ImageAnalysisPage from "./pages/ImageAnalysis";
 import HistoryPage from "./pages/History";
+import DashboardPage from "./pages/Dashboard";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -26,6 +27,7 @@ const App = () => (
             <Route path="/analyze" element={<Analyze />} />
             <Route path="/image-analysis" element={<ImageAnalysisPage />} />
             <Route path="/history" element={<HistoryPage />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>

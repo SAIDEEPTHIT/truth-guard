@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ImageIcon, Upload, Loader2, RotateCcw, ExternalLink } from "lucide-react";
 import { analyzeImage, type ImageAnalysisResult } from "@/lib/analyzer";
 import { addToHistory } from "./AnalysisHistory";
+import { recordAnalysis } from "@/lib/analysisStore";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
 import RiskGauge from "./RiskGauge";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,13 @@ const ImageAnalyzer = () => {
     const analysis = await analyzeImage(f);
     setResult(analysis);
     addToHistory("image", f.name, analysis.risk_score, analysis.classification);
+    recordAnalysis({
+      type: "image",
+      input_preview: f.name,
+      risk_score: analysis.risk_score,
+      classification: analysis.classification,
+      signals: { ai_generated: analysis.risk_score, scam_keywords: 0, emotional_manipulation: 0 },
+    });
     setLoading(false);
   }, []);
 

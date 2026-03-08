@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Shield, Send, Loader2, RotateCcw, FileText, Globe, BookOpen, Link2, TrendingUp } from "lucide-react";
 import { analyzeText, type AnalysisResult } from "@/lib/analyzer";
 import { addToHistory } from "./AnalysisHistory";
+import { recordAnalysis } from "@/lib/analysisStore";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
 import RiskGauge from "./RiskGauge";
 import SignalBars from "./SignalBars";
@@ -31,6 +32,13 @@ const TextAnalyzer = () => {
     const analysis = analyzeText(text);
     setResult(analysis);
     addToHistory("text", text, analysis.risk_score, analysis.classification);
+    recordAnalysis({
+      type: "text",
+      input_preview: text.slice(0, 120),
+      risk_score: analysis.risk_score,
+      classification: analysis.classification,
+      signals: analysis.signals,
+    });
     setLoading(false);
   };
 
