@@ -17,9 +17,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const text = info.selectionText.trim();
     if (!text) return;
 
-    // Notify popup that analysis started
-    chrome.runtime.sendMessage({ type: "analysis_start" });
+    // Store loading state so popup can detect it
+    chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null });
 
+    // Try sending message to popup (may fail if popup is closed — that's ok)
+    try { chrome.runtime.sendMessage({ type: "analysis_start" }); } catch (_) {}
+
+    let result;
     try {
       const response = await fetch(`${API_URL}/analyze`, {
         method: "POST",
@@ -27,21 +31,26 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         body: JSON.stringify({ text }),
       });
 
-      if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      // Store result and notify popup
-      chrome.storage.local.set({ truthshield_result: data });
-      chrome.runtime.sendMessage({ type: "analysis_result", data });
+      if (!response.ok) throw new Error(`Server error: ${response.status}`);
+      result = await response.json();
     } catch (err) {
-      // If backend is unavailable, use local heuristic fallback
-      const fallbackResult = analyzeLocally(text);
-      chrome.storage.local.set({ truthshield_result: fallbackResult });
-      chrome.runtime.sendMessage({ type: "analysis_result", data: fallbackResult });
+      // Fallback to local heuristic analysis
+      result = analyzeLocally(text);
     }
+
+    // Store result and update badge
+    chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false });
+
+    // Set badge to show risk score
+    const badgeColor =
+      result.classification === "Safe" ? "#22c55e" :
+      result.classification === "Suspicious" ? "#eab308" : "#ef4444";
+
+    chrome.action.setBadgeText({ text: String(result.risk_score) });
+    chrome.action.setBadgeBackgroundColor({ color: badgeColor });
+
+    // Try notifying popup
+    try { chrome.runtime.sendMessage({ type: "analysis_result", data: result }); } catch (_) {}
   }
 });
 
@@ -74,28 +83,22 @@ const AI_PATTERNS = [
 
 function analyzeLocally(text) {
   const lower = text.toLowerCase();
-  const words = lower.split(/\s+/);
 
-  // Scam score
   const scamHits = SCAM_KEYWORDS.filter((kw) => lower.includes(kw));
   const scamScore = Math.min(100, scamHits.length * 18);
 
-  // Urgency / emotional manipulation score
   const urgencyHits = URGENCY_PHRASES.filter((p) => lower.includes(p));
   const emoScore = Math.min(100, urgencyHits.length * 22);
 
-  // AI-generated score
   const aiHits = AI_PATTERNS.filter((p) => lower.includes(p));
   const aiScore = Math.min(100, aiHits.length * 20);
 
-  // Combined risk score
   const riskScore = Math.min(100, Math.round(aiScore * 0.3 + scamScore * 0.4 + emoScore * 0.3));
 
   const classification =
     riskScore < 30 ? "Safe" :
     riskScore < 65 ? "Suspicious" : "High Risk";
 
-  // Build highlighted text
   const allSuspicious = [...scamHits, ...urgencyHits, ...aiHits];
   let highlightedText = text;
   allSuspicious.forEach((phrase) => {
