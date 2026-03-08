@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Shield, Send, Loader2, RotateCcw, FileText } from "lucide-react";
+import { Shield, Send, Loader2, RotateCcw, FileText, Globe, BookOpen, Link2, TrendingUp } from "lucide-react";
 import { analyzeText, type AnalysisResult } from "@/lib/analyzer";
 import { addToHistory } from "./AnalysisHistory";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
@@ -27,7 +27,6 @@ const TextAnalyzer = () => {
   const handleAnalyze = async () => {
     if (!text.trim()) return;
     setLoading(true);
-    // Simulate network delay for UX
     await new Promise(r => setTimeout(r, 800));
     const analysis = analyzeText(text);
     setResult(analysis);
@@ -99,10 +98,10 @@ const TextAnalyzer = () => {
               <p className="text-xs text-muted-foreground mb-2 font-medium">Try a sample:</p>
               <div className="flex flex-wrap gap-2">
                 {[
-                  { key: "scam" as const, label: "🎣 Scam Email", color: "destructive" },
-                  { key: "safe" as const, label: "✅ Safe Text", color: "success" },
-                  { key: "ai" as const, label: "🤖 AI Generated", color: "accent" },
-                  { key: "indian" as const, label: "🇮🇳 Indian Scam", color: "warning" },
+                  { key: "scam" as const, label: "🎣 Scam Email" },
+                  { key: "safe" as const, label: "✅ Safe Text" },
+                  { key: "ai" as const, label: "🤖 AI Generated" },
+                  { key: "indian" as const, label: "🇮🇳 Indian Scam" },
                 ].map(sample => (
                   <button
                     key={sample.key}
@@ -114,6 +113,69 @@ const TextAnalyzer = () => {
                 ))}
               </div>
             </div>
+
+            {/* Metadata cards (shown after analysis) */}
+            {result && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-3 rounded-lg border border-border bg-card">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Globe className="w-3.5 h-3.5 text-primary" />
+                    <span className="text-xs font-medium text-muted-foreground">Language</span>
+                  </div>
+                  <p className="font-semibold text-sm">{result.language}</p>
+                </div>
+                <div className="p-3 rounded-lg border border-border bg-card">
+                  <div className="flex items-center gap-2 mb-1">
+                    <TrendingUp className="w-3.5 h-3.5 text-primary" />
+                    <span className="text-xs font-medium text-muted-foreground">Confidence</span>
+                  </div>
+                  <p className="font-semibold text-sm">{result.confidence}%</p>
+                </div>
+                <div className="p-3 rounded-lg border border-border bg-card">
+                  <div className="flex items-center gap-2 mb-1">
+                    <BookOpen className="w-3.5 h-3.5 text-primary" />
+                    <span className="text-xs font-medium text-muted-foreground">Readability</span>
+                  </div>
+                  <p className="font-semibold text-sm">{result.readability.level}</p>
+                  <p className="text-xs text-muted-foreground">{result.readability.grade} • {result.readability.score}/100</p>
+                </div>
+                <div className="p-3 rounded-lg border border-border bg-card">
+                  <div className="flex items-center gap-2 mb-1">
+                    <FileText className="w-3.5 h-3.5 text-primary" />
+                    <span className="text-xs font-medium text-muted-foreground">Word Count</span>
+                  </div>
+                  <p className="font-semibold text-sm">{result.readability.wordCount} words</p>
+                  <p className="text-xs text-muted-foreground">{result.readability.sentenceCount} sentences • {result.readability.avgWordsPerSentence} avg</p>
+                </div>
+              </div>
+            )}
+
+            {/* URL analysis */}
+            {result && result.url_analysis.length > 0 && (
+              <div className="p-4 rounded-lg border border-border bg-card">
+                <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                  <Link2 className="w-4 h-4 text-primary" />
+                  Links Found ({result.url_analysis.length})
+                </h3>
+                <div className="space-y-2">
+                  {result.url_analysis.map((ua, i) => (
+                    <div key={i} className={`p-2.5 rounded-md border text-sm ${
+                      ua.safe ? "border-success/30 bg-success/5" : "border-destructive/30 bg-destructive/5"
+                    }`}>
+                      <div className="flex items-center justify-between mb-1">
+                        <code className="text-xs break-all">{ua.url.length > 60 ? ua.url.slice(0, 57) + "..." : ua.url}</code>
+                        <span className={`text-xs font-bold ml-2 ${ua.safe ? "text-success" : "text-destructive"}`}>
+                          {ua.safe ? "✅ Safe" : `⚠️ ${ua.score}/100`}
+                        </span>
+                      </div>
+                      {ua.flags.map((f, j) => (
+                        <p key={j} className="text-xs text-muted-foreground pl-2">• {f}</p>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Results Panel */}
@@ -142,7 +204,6 @@ const TextAnalyzer = () => {
                 exit={{ opacity: 0, y: -20 }}
                 className="space-y-4"
               >
-                {/* Score Card */}
                 <div className="rounded-lg border border-border bg-card p-6 flex flex-col items-center">
                   <RiskGauge score={result.risk_score} classification={result.classification} />
                   <motion.div
@@ -168,7 +229,6 @@ const TextAnalyzer = () => {
                   </motion.div>
                 </div>
 
-                {/* Detailed tabs */}
                 <Tabs defaultValue="signals" className="rounded-lg border border-border bg-card">
                   <TabsList className="w-full bg-secondary/50 rounded-t-lg rounded-b-none">
                     <TabsTrigger value="signals" className="flex-1">Signals</TabsTrigger>

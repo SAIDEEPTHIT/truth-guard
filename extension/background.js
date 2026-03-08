@@ -1,21 +1,34 @@
-// TruthShield Background Service Worker (Manifest V3) — Enhanced
+// TruthShield Background Service Worker (Manifest V3) — Enhanced v2.1
+// Supports: Text analysis, Image analysis, URL safety check
 
 const API_URL = "https://truth-guard-1.onrender.com";
 
+// ── Context Menus ──
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
-    id: "truthshield-analyze",
-    title: "Analyze with TruthShield",
+    id: "truthshield-analyze-text",
+    title: "🛡️ Analyze Text with TruthShield",
     contexts: ["selection"],
+  });
+  chrome.contextMenus.create({
+    id: "truthshield-analyze-image",
+    title: "🖼️ Check if Image is AI-Generated",
+    contexts: ["image"],
+  });
+  chrome.contextMenus.create({
+    id: "truthshield-check-link",
+    title: "🔗 Check Link Safety",
+    contexts: ["link"],
   });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId === "truthshield-analyze" && info.selectionText) {
+  // ── Text Analysis ──
+  if (info.menuItemId === "truthshield-analyze-text" && info.selectionText) {
     const text = info.selectionText.trim();
     if (!text) return;
 
-    chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null });
+    chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null, truthshield_mode: "text" });
     chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
 
     let result;
@@ -28,10 +41,20 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       if (!response.ok) throw new Error(`Server error: ${response.status}`);
       result = await response.json();
     } catch (err) {
-      result = analyzeLocally(text);
+      result = analyzeTextLocally(text);
     }
 
-    chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false });
+    // Add URL analysis to text result
+    const urls = extractURLs(text);
+    if (urls.length > 0) {
+      result.url_analysis = urls.map(url => analyzeURL(url));
+    }
+
+    // Add readability + language
+    result.readability = analyzeReadability(text);
+    result.language = detectLanguage(text);
+
+    chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false, truthshield_mode: "text" });
 
     const badgeColor =
       result.classification === "Safe" ? "#22c55e" :
@@ -41,9 +64,47 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
     chrome.runtime.sendMessage({ type: "analysis_result", data: result }).catch(() => {});
   }
+
+  // ── Image Analysis ──
+  if (info.menuItemId === "truthshield-analyze-image" && info.srcUrl) {
+    chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null, truthshield_mode: "image" });
+    chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
+
+    const result = await analyzeImageFromURL(info.srcUrl);
+
+    chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false, truthshield_mode: "image" });
+
+    const badgeColor =
+      result.classification === "Likely Authentic" ? "#22c55e" :
+      result.classification === "Possibly AI-Generated" ? "#eab308" : "#ef4444";
+    chrome.action.setBadgeText({ text: String(result.risk_score) });
+    chrome.action.setBadgeBackgroundColor({ color: badgeColor });
+
+    chrome.runtime.sendMessage({ type: "analysis_result", data: result, mode: "image" }).catch(() => {});
+  }
+
+  // ── Link Safety ──
+  if (info.menuItemId === "truthshield-check-link" && info.linkUrl) {
+    chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null, truthshield_mode: "url" });
+    chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
+
+    const result = analyzeURLDetailed(info.linkUrl);
+
+    chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false, truthshield_mode: "url" });
+
+    const badgeColor = result.risk_score < 30 ? "#22c55e" : result.risk_score < 65 ? "#eab308" : "#ef4444";
+    chrome.action.setBadgeText({ text: String(result.risk_score) });
+    chrome.action.setBadgeBackgroundColor({ color: badgeColor });
+
+    chrome.runtime.sendMessage({ type: "analysis_result", data: result, mode: "url" }).catch(() => {});
+  }
 });
 
-// ── Local heuristic analysis (enhanced with explanations) ──
+// ══════════════════════════════════════════════════════════════════════════════
+// LOCAL ANALYSIS ENGINES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Scam/AI/Urgency/India keyword banks ──
 
 const SCAM_KEYWORDS = [
   { phrase: "congratulations", reason: "Unsolicited congratulations are a classic phishing opener.", severity: "medium" },
@@ -71,6 +132,17 @@ const SCAM_KEYWORDS = [
   { phrase: "send money", reason: "Requests to send money to strangers = fraud.", severity: "high" },
   { phrase: "western union", reason: "Untraceable payment method favored by scammers.", severity: "high" },
   { phrase: "arrest warrant", reason: "Law enforcement doesn't issue warrants via email.", severity: "high" },
+  { phrase: "bitcoin", reason: "Cryptocurrency requests in unsolicited messages = fraud.", severity: "high" },
+  { phrase: "cryptocurrency", reason: "Crypto investment scams are rising rapidly.", severity: "medium" },
+  { phrase: "investment opportunity", reason: "Unsolicited investment offers are often Ponzi schemes.", severity: "high" },
+  { phrase: "dear customer", reason: "Generic greetings in official-looking emails = phishing.", severity: "medium" },
+  { phrase: "dear user", reason: "Impersonal address in 'urgent' messages = red flag.", severity: "medium" },
+  { phrase: "whatsapp", reason: "Scams frequently impersonate WhatsApp notifications.", severity: "low" },
+  { phrase: "gift card", reason: "Gift card payment requests = untraceable scam.", severity: "high" },
+  { phrase: "tech support", reason: "Unsolicited tech support calls/messages = scam.", severity: "high" },
+  { phrase: "remote access", reason: "Remote access requests = complete system compromise.", severity: "high" },
+  { phrase: "teamviewer", reason: "TeamViewer requests from strangers = scam.", severity: "high" },
+  { phrase: "anydesk", reason: "AnyDesk requests from strangers = scam.", severity: "high" },
 ];
 
 const URGENCY_PHRASES = [
@@ -86,6 +158,8 @@ const URGENCY_PHRASES = [
   { phrase: "before it's too late", reason: "Fear-based language triggers impulsive action.", severity: "high" },
   { phrase: "now or never", reason: "False ultimatum to force action.", severity: "high" },
   { phrase: "today only", reason: "False time limit prevents research.", severity: "high" },
+  { phrase: "don't ignore", reason: "Guilt-tripping to force action.", severity: "medium" },
+  { phrase: "your account will be", reason: "Threat-based urgency.", severity: "high" },
 ];
 
 const AI_PATTERNS = [
@@ -103,6 +177,12 @@ const AI_PATTERNS = [
   { phrase: "harness the power", reason: "Formulaic AI phrase.", severity: "medium" },
   { phrase: "in today's world", reason: "Generic AI opener.", severity: "medium" },
   { phrase: "navigating the complexities", reason: "Abstract AI phrasing.", severity: "medium" },
+  { phrase: "a testament to", reason: "Formulaic AI praise pattern.", severity: "medium" },
+  { phrase: "tapestry", reason: "Overused metaphor in AI writing.", severity: "medium" },
+  { phrase: "landscape of", reason: "Abstract AI framing.", severity: "low" },
+  { phrase: "at the forefront", reason: "AI-typical positioning phrase.", severity: "low" },
+  { phrase: "plays a crucial role", reason: "Formulaic AI importance statement.", severity: "medium" },
+  { phrase: "in this article", reason: "AI meta-reference to its own output.", severity: "medium" },
 ];
 
 const INDIA_SCAM_PATTERNS = [
@@ -120,9 +200,21 @@ const INDIA_SCAM_PATTERNS = [
   { phrase: "job offer", reason: "Unsolicited job offers via WhatsApp = fraud.", severity: "medium" },
   { phrase: "work from home", reason: "Fake work-from-home offers are rising.", severity: "medium" },
   { phrase: "electricity bill", reason: "Fake disconnection threats = payment fraud.", severity: "high" },
+  { phrase: "paytm", reason: "Fake Paytm messages for payment fraud.", severity: "medium" },
+  { phrase: "phonepe", reason: "PhonePe impersonation scam.", severity: "medium" },
+  { phrase: "google pay", reason: "Google Pay scams trick users into sending money.", severity: "medium" },
+  { phrase: "hdfc", reason: "HDFC Bank impersonation for phishing.", severity: "high" },
+  { phrase: "icici", reason: "ICICI Bank impersonation for credential theft.", severity: "high" },
+  { phrase: "customs duty", reason: "Fake customs duty = parcel delivery scam.", severity: "high" },
+  { phrase: "telegram channel", reason: "Telegram-based task scams are widespread.", severity: "medium" },
+  { phrase: "olx", reason: "OLX buyer/seller scams are common in India.", severity: "medium" },
+  { phrase: "flipkart", reason: "Flipkart impersonation in fake offers.", severity: "medium" },
+  { phrase: "amazon delivery", reason: "Fake Amazon delivery notifications.", severity: "medium" },
 ];
 
-function analyzeLocally(text) {
+// ── Text Analysis Engine ──
+
+function analyzeTextLocally(text) {
   const lower = text.toLowerCase();
 
   const findMatches = (bank, category) => {
@@ -141,9 +233,12 @@ function analyzeLocally(text) {
   const ai = findMatches(AI_PATTERNS, "ai");
   const india = findMatches(INDIA_SCAM_PATTERNS, "india_scam");
 
+  // Stylometric analysis
+  const stylo = analyzeStylometry(text);
+
   const scamScore = Math.min(100, [...scam.hits, ...india.hits].length * 14);
   const emoScore = Math.min(100, urgency.hits.length * 18);
-  const aiScore = Math.min(100, ai.hits.length * 16);
+  const aiScore = Math.min(100, ai.hits.length * 16 + stylo.score);
   const riskScore = Math.min(100, Math.round(aiScore * 0.3 + scamScore * 0.4 + emoScore * 0.3));
 
   const classification = riskScore < 30 ? "Safe" : riskScore < 65 ? "Suspicious" : "High Risk";
@@ -151,13 +246,17 @@ function analyzeLocally(text) {
   const allSuspicious = [...new Set([...scam.hits, ...urgency.hits, ...ai.hits, ...india.hits])];
   const allExplanations = [...scam.explanations, ...urgency.explanations, ...ai.explanations, ...india.explanations];
 
+  // Add stylometric explanations
+  stylo.indicators.forEach(ind => {
+    allExplanations.push({ category: "ai", phrase: "(stylometric)", reason: ind, severity: "medium" });
+  });
+
   let highlightedText = text;
   allSuspicious.forEach(phrase => {
     const regex = new RegExp(`(${phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
     highlightedText = highlightedText.replace(regex, "<mark>$1</mark>");
   });
 
-  // Generate summary
   let summary;
   if (classification === "Safe") {
     summary = "This content appears safe. No significant scam or manipulation indicators detected.";
@@ -172,7 +271,6 @@ function analyzeLocally(text) {
       : `⚡ SUSPICIOUS: Shows signs of ${parts.join(", ")}. Verify the source before acting.`;
   }
 
-  // Generate tips
   const tips = [];
   if (classification !== "Safe") {
     if (scam.hits.length > 0 || india.hits.length > 0) {
@@ -198,4 +296,349 @@ function analyzeLocally(text) {
     summary,
     tips,
   };
+}
+
+// ── Stylometric Analysis ──
+
+function analyzeStylometry(text) {
+  let score = 0;
+  const indicators = [];
+
+  const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  if (sentences.length >= 3) {
+    const lengths = sentences.map(s => s.trim().split(/\s+/).length);
+    const avg = lengths.reduce((a, b) => a + b, 0) / lengths.length;
+    const variance = lengths.reduce((sum, l) => sum + Math.pow(l - avg, 2), 0) / lengths.length;
+    const stdDev = Math.sqrt(variance);
+
+    if (stdDev < 3 && sentences.length > 4) {
+      score += 15;
+      indicators.push("Unusually uniform sentence length — typical of AI-generated text.");
+    }
+    if (avg > 14 && avg < 26) {
+      score += 8;
+      indicators.push("Average sentence length in AI-typical range (15-25 words).");
+    }
+  }
+
+  const hedges = ["however", "nevertheless", "nonetheless", "on the other hand", "that being said", "it should be noted"];
+  const hedgeCount = hedges.filter(h => text.toLowerCase().includes(h)).length;
+  if (hedgeCount >= 3) {
+    score += 10;
+    indicators.push("Excessive hedging language — characteristic of AI writing.");
+  }
+
+  const words = text.split(/\s+/).length;
+  const contractions = (text.match(/\b\w+'\w+\b/g) || []).length;
+  if (words > 50 && contractions / words < 0.005) {
+    score += 8;
+    indicators.push("Very few contractions — overly formal AI writing style.");
+  }
+
+  // Vocabulary diversity (Type-Token Ratio)
+  const wordList = text.toLowerCase().match(/\b[a-z]+\b/g) || [];
+  if (wordList.length > 50) {
+    const uniqueWords = new Set(wordList).size;
+    const ttr = uniqueWords / wordList.length;
+    if (ttr > 0.7) {
+      score += 8;
+      indicators.push("High vocabulary diversity — consistent with AI text generation.");
+    }
+  }
+
+  return { score: Math.min(40, score), indicators };
+}
+
+// ── Image Analysis (from URL) ──
+
+async function analyzeImageFromURL(imageUrl) {
+  const indicators = [];
+  let score = 0;
+  const metadata = {};
+
+  metadata["Source URL"] = imageUrl.length > 80 ? imageUrl.substring(0, 77) + "..." : imageUrl;
+
+  try {
+    const response = await fetch(imageUrl);
+    const blob = await response.blob();
+    metadata["File Size"] = (blob.size / 1024).toFixed(1) + " KB";
+    metadata["MIME Type"] = blob.type || "unknown";
+
+    // Check size — very small images are suspicious
+    if (blob.size < 50 * 1024) {
+      score += 5;
+      indicators.push("Small file size — may be AI-generated thumbnail.");
+    }
+
+    // Check for EXIF marker in first 64KB
+    const buffer = await blob.slice(0, 65536).arrayBuffer();
+    const view = new Uint8Array(buffer);
+    let hasExif = false;
+    for (let i = 0; i < view.length - 1; i++) {
+      if (view[i] === 0xFF && view[i + 1] === 0xE1) { hasExif = true; break; }
+    }
+    if (!hasExif) {
+      score += 12;
+      indicators.push("No EXIF metadata — AI images typically lack camera data.");
+    } else {
+      score -= 8;
+      indicators.push("✅ EXIF metadata present — suggests real camera capture.");
+    }
+
+    // Analyze via offscreen canvas
+    const imgBitmap = await createImageBitmap(blob);
+    metadata["Dimensions"] = `${imgBitmap.width} × ${imgBitmap.height}`;
+
+    // Common AI dimensions
+    const aiDims = [[512,512],[768,768],[1024,1024],[1024,768],[768,1024],[1920,1080],[1344,768],[768,1344]];
+    if (aiDims.some(([w,h]) => imgBitmap.width === w && imgBitmap.height === h)) {
+      score += 15;
+      indicators.push(`Dimensions (${imgBitmap.width}×${imgBitmap.height}) match AI generator output sizes.`);
+    }
+
+    // Pixel analysis via OffscreenCanvas
+    const canvas = new OffscreenCanvas(Math.min(imgBitmap.width, 256), Math.min(imgBitmap.height, 256));
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(imgBitmap, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const pixels = imageData.data;
+
+    // Color histogram dominance
+    const histogram = new Array(256).fill(0);
+    for (let i = 0; i < pixels.length; i += 4) {
+      const gray = Math.round(0.299 * pixels[i] + 0.587 * pixels[i+1] + 0.114 * pixels[i+2]);
+      histogram[gray]++;
+    }
+    const totalPx = canvas.width * canvas.height;
+    const dominance = Math.max(...histogram) / totalPx;
+    if (dominance > 0.15) {
+      score += 10;
+      indicators.push("Unusual color uniformity — may indicate AI generation.");
+    }
+
+    // Smooth gradient check
+    let smooth = 0, total = 0;
+    for (let i = 4; i < pixels.length; i += 4) {
+      const diff = Math.abs(pixels[i]-pixels[i-4]) + Math.abs(pixels[i+1]-pixels[i-3]) + Math.abs(pixels[i+2]-pixels[i-2]);
+      if (diff < 10) smooth++;
+      total++;
+    }
+    if (total > 0 && smooth/total > 0.7) {
+      score += 12;
+      indicators.push("High smooth color transitions — characteristic of AI imagery.");
+    }
+
+    // Edge sharpness analysis
+    let sharpEdges = 0;
+    for (let i = 4; i < pixels.length; i += 4) {
+      const diff = Math.abs(pixels[i]-pixels[i-4]) + Math.abs(pixels[i+1]-pixels[i-3]) + Math.abs(pixels[i+2]-pixels[i-2]);
+      if (diff > 100) sharpEdges++;
+    }
+    if (total > 0 && sharpEdges/total < 0.02) {
+      score += 8;
+      indicators.push("Very few sharp edges — AI images tend to have smoother boundaries.");
+    }
+
+  } catch (err) {
+    indicators.push("Could not fully analyze image (CORS restriction).");
+    score += 10; // Be cautious
+  }
+
+  // URL pattern check
+  const aiUrlPatterns = /\b(dalle|midjourney|stable.?diffusion|comfyui|generated|ai[_-]|artificial|deepfake)\b/i;
+  if (aiUrlPatterns.test(imageUrl)) {
+    score += 20;
+    indicators.push("URL contains AI tool references.");
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  const classification = score < 25 ? "Likely Authentic" : score < 55 ? "Possibly AI-Generated" : "Likely AI-Generated";
+
+  const tips = [];
+  if (score >= 25) {
+    tips.push("Right-click the image and use Google Reverse Image Search.");
+    tips.push("Look for artifacts: irregular fingers, asymmetric details, blurred text.");
+    tips.push("Check if the source is a verified, credible publisher.");
+  }
+  tips.push("AI image detection is probabilistic — no tool is 100% accurate.");
+
+  return {
+    risk_score: score,
+    classification,
+    indicators,
+    metadata,
+    tips,
+    type: "image",
+  };
+}
+
+// ── URL Safety Analysis ──
+
+const SUSPICIOUS_TLDS = [".xyz", ".top", ".click", ".loan", ".work", ".gq", ".ml", ".cf", ".tk", ".buzz", ".monster", ".icu", ".cam", ".rest", ".surf"];
+const PHISHING_KEYWORDS = ["login", "verify", "secure", "account", "update", "confirm", "banking", "paypal", "signin", "password", "credential"];
+const TRUSTED_DOMAINS = ["google.com", "facebook.com", "youtube.com", "twitter.com", "github.com", "microsoft.com", "apple.com", "amazon.com", "wikipedia.org", "linkedin.com", "instagram.com", "reddit.com", "stackoverflow.com", "flipkart.com", "paytm.com"];
+
+function extractURLs(text) {
+  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
+  return (text.match(urlRegex) || []);
+}
+
+function analyzeURL(url) {
+  let score = 0;
+  const flags = [];
+
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Check TLD
+    if (SUSPICIOUS_TLDS.some(tld => hostname.endsWith(tld))) {
+      score += 25;
+      flags.push("Suspicious top-level domain");
+    }
+
+    // Check for IP address as hostname
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
+      score += 30;
+      flags.push("Uses IP address instead of domain name");
+    }
+
+    // Check for excessive subdomains
+    if (hostname.split(".").length > 4) {
+      score += 15;
+      flags.push("Excessive subdomains — may be masking real domain");
+    }
+
+    // Check for phishing keywords in URL
+    const urlLower = url.toLowerCase();
+    const phishingHits = PHISHING_KEYWORDS.filter(kw => urlLower.includes(kw));
+    if (phishingHits.length >= 2) {
+      score += 20;
+      flags.push(`Contains phishing keywords: ${phishingHits.join(", ")}`);
+    }
+
+    // Check for URL shorteners
+    const shorteners = ["bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "buff.ly", "adf.ly", "cutt.ly"];
+    if (shorteners.some(s => hostname.includes(s))) {
+      score += 15;
+      flags.push("URL shortener detected — destination unknown");
+    }
+
+    // Check for typosquatting
+    const typosquats = ["goggle", "gooogle", "faceb00k", "amaz0n", "paypall", "micr0soft", "instgram", "linkdin"];
+    if (typosquats.some(t => hostname.includes(t))) {
+      score += 35;
+      flags.push("Possible typosquatting — mimics a trusted brand");
+    }
+
+    // Check if trusted
+    if (TRUSTED_DOMAINS.some(d => hostname === d || hostname.endsWith("." + d))) {
+      score -= 20;
+      flags.push("✅ Recognized trusted domain");
+    }
+
+    // Check for suspicious characters (homograph attack)
+    if (/[^\x00-\x7F]/.test(hostname)) {
+      score += 25;
+      flags.push("Non-ASCII characters in domain — possible homograph attack");
+    }
+
+    // Very long URL
+    if (url.length > 200) {
+      score += 10;
+      flags.push("Unusually long URL");
+    }
+
+    // HTTP (not HTTPS)
+    if (parsed.protocol === "http:") {
+      score += 10;
+      flags.push("Uses HTTP (not secure HTTPS)");
+    }
+
+  } catch {
+    score += 20;
+    flags.push("Invalid or malformed URL");
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  return { url, score, flags, safe: score < 30 };
+}
+
+function analyzeURLDetailed(url) {
+  const analysis = analyzeURL(url);
+  const classification = analysis.score < 30 ? "Safe" : analysis.score < 65 ? "Suspicious" : "High Risk";
+
+  return {
+    type: "url",
+    risk_score: analysis.score,
+    classification,
+    url: analysis.url,
+    flags: analysis.flags,
+    tips: [
+      "Always check the domain name carefully before entering credentials.",
+      "Look for HTTPS and a valid certificate.",
+      "When in doubt, type the URL manually instead of clicking links.",
+      "Use Google Safe Browsing to verify: transparencyreport.google.com/safe-browsing",
+    ],
+  };
+}
+
+// ── Readability Analysis ──
+
+function analyzeReadability(text) {
+  const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  const words = text.split(/\s+/).filter(w => w.length > 0);
+  const syllables = words.reduce((sum, w) => sum + countSyllables(w), 0);
+
+  if (sentences.length === 0 || words.length === 0) return { score: 0, grade: "N/A", level: "N/A" };
+
+  // Flesch Reading Ease
+  const avgSentLen = words.length / sentences.length;
+  const avgSyllables = syllables / words.length;
+  const flesch = Math.max(0, Math.min(100, 206.835 - (1.015 * avgSentLen) - (84.6 * avgSyllables)));
+
+  let grade, level;
+  if (flesch >= 90) { grade = "5th grade"; level = "Very Easy"; }
+  else if (flesch >= 80) { grade = "6th grade"; level = "Easy"; }
+  else if (flesch >= 70) { grade = "7th grade"; level = "Fairly Easy"; }
+  else if (flesch >= 60) { grade = "8th-9th grade"; level = "Standard"; }
+  else if (flesch >= 50) { grade = "10th-12th grade"; level = "Fairly Difficult"; }
+  else if (flesch >= 30) { grade = "College"; level = "Difficult"; }
+  else { grade = "Graduate"; level = "Very Difficult"; }
+
+  return { score: Math.round(flesch), grade, level, wordCount: words.length, sentenceCount: sentences.length };
+}
+
+function countSyllables(word) {
+  word = word.toLowerCase().replace(/[^a-z]/g, "");
+  if (word.length <= 3) return 1;
+  const vowelGroups = word.match(/[aeiouy]+/g);
+  let count = vowelGroups ? vowelGroups.length : 1;
+  if (word.endsWith("e") && count > 1) count--;
+  return Math.max(1, count);
+}
+
+// ── Language Detection ──
+
+function detectLanguage(text) {
+  const patterns = {
+    Hindi: /[\u0900-\u097F]/,
+    Tamil: /[\u0B80-\u0BFF]/,
+    Telugu: /[\u0C00-\u0C7F]/,
+    Kannada: /[\u0C80-\u0CFF]/,
+    Malayalam: /[\u0D00-\u0D7F]/,
+    Bengali: /[\u0980-\u09FF]/,
+    Gujarati: /[\u0A80-\u0AFF]/,
+    Punjabi: /[\u0A00-\u0A7F]/,
+    Arabic: /[\u0600-\u06FF]/,
+    Chinese: /[\u4E00-\u9FFF]/,
+    Japanese: /[\u3040-\u309F\u30A0-\u30FF]/,
+    Korean: /[\uAC00-\uD7AF]/,
+    Russian: /[\u0400-\u04FF]/,
+  };
+
+  for (const [lang, regex] of Object.entries(patterns)) {
+    if (regex.test(text)) return lang;
+  }
+  return "English";
 }
