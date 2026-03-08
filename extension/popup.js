@@ -2,15 +2,19 @@
 // Handles: Text, Image, and URL analysis results
 
 document.addEventListener("DOMContentLoaded", () => {
-  // ── Senior Mode ──
+  // ── Senior Mode (use chrome.storage.local for persistence) ──
   const seniorToggle = document.getElementById("senior-toggle");
-  const savedSenior = localStorage.getItem("truthshield_senior") === "true";
-  seniorToggle.checked = savedSenior;
-  if (savedSenior) document.body.classList.add("senior-mode");
+
+  chrome.storage.local.get(["truthshield_senior"], (data) => {
+    const isSenior = data.truthshield_senior === true;
+    seniorToggle.checked = isSenior;
+    if (isSenior) document.body.classList.add("senior-mode");
+  });
 
   seniorToggle.addEventListener("change", () => {
-    document.body.classList.toggle("senior-mode", seniorToggle.checked);
-    localStorage.setItem("truthshield_senior", seniorToggle.checked);
+    const isChecked = seniorToggle.checked;
+    document.body.classList.toggle("senior-mode", isChecked);
+    chrome.storage.local.set({ truthshield_senior: isChecked });
     chrome.storage.local.get(["truthshield_result", "truthshield_mode"], (data) => {
       if (data.truthshield_result) renderResult(data.truthshield_result, data.truthshield_mode || "text");
     });
