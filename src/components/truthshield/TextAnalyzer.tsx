@@ -32,6 +32,13 @@ const TextAnalyzer = () => {
     const analysis = analyzeText(text);
     setResult(analysis);
     addToHistory("text", text, analysis.risk_score, analysis.classification);
+    recordAnalysis({
+      type: "text",
+      input_preview: text.slice(0, 120),
+      risk_score: analysis.risk_score,
+      classification: analysis.classification,
+      signals: analysis.signals,
+    });
     setLoading(false);
   };
 
