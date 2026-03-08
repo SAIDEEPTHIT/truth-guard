@@ -9,6 +9,8 @@ import Index from "./pages/Index";
 import Analyze from "./pages/Analyze";
 import ImageAnalysisPage from "./pages/ImageAnalysis";
 import HistoryPage from "./pages/History";
+import DashboardPage from "./pages/Dashboard";
+import NotFound from "./pages/NotFound";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
