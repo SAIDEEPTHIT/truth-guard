@@ -193,6 +193,20 @@ const INDIA_SCAM_PATTERNS: { phrase: string; reason: string; severity: "low" | "
 
 // ── Helper Functions ──
 
+// Weight constants for scoring
+const SCAM_WEIGHT = 15;
+const URGENCY_WEIGHT = 10;
+const FINANCIAL_WEIGHT = 20;
+const LINK_WEIGHT = 25;
+
+const FINANCIAL_PHRASES = [
+  "bank account", "wire transfer", "send money", "processing fee", "credit card",
+  "debit card", "social security", "western union", "money gram", "bitcoin",
+  "cryptocurrency", "investment opportunity", "double your money", "gift card",
+  "upi", "paytm", "phonepe", "google pay", "sbi", "hdfc", "icici",
+  "aadhaar", "pan card", "otp", "share otp", "kyc update",
+];
+
 function findMatches(
   textLower: string,
   bank: { phrase: string; reason: string; severity: "low" | "medium" | "high" }[],
@@ -517,8 +531,19 @@ export function analyzeText(text: string): AnalysisResult {
   const ai = findMatches(lower, AI_PATTERNS, "ai");
   const india = findMatches(lower, INDIA_SCAM_PATTERNS, "india_scam");
 
-  const scamScore = scoreFromHits([...scam.hits, ...india.hits], 14);
-  const emoScore = scoreFromHits(urgency.hits, 18);
+  // New weighted scoring
+  const allScamHits = [...scam.hits, ...india.hits];
+  const financialHits = allScamHits.filter(h => FINANCIAL_PHRASES.includes(h));
+  const regularScamHits = allScamHits.filter(h => !FINANCIAL_PHRASES.includes(h));
+
+  const scamPoints = regularScamHits.length * SCAM_WEIGHT + financialHits.length * FINANCIAL_WEIGHT;
+  const urgencyPoints = urgency.hits.length * URGENCY_WEIGHT;
+
+  // URL analysis & scoring
+  const urls = extractURLs(text);
+  const url_analysis = urls.map(u => analyzeURL(u));
+  const suspiciousLinks = url_analysis.filter(u => !u.safe);
+  const linkPoints = suspiciousLinks.length * LINK_WEIGHT;
 
   const stylometry = analyzeStylometry(text);
   const aiBaseScore = scoreFromHits(ai.hits, 16);
@@ -531,10 +556,15 @@ export function analyzeText(text: string): AnalysisResult {
     severity: "medium" as const,
   }));
 
-  const riskScore = Math.min(100, Math.round(aiScore * 0.3 + scamScore * 0.4 + emoScore * 0.3));
+  // Final risk = sum of all points, clamped 0-100
+  const rawScore = scamPoints + urgencyPoints + linkPoints + Math.round(aiScore * 0.3);
+  const riskScore = Math.max(0, Math.min(100, rawScore));
+
+  const scamSignal = Math.min(100, scamPoints);
+  const emoSignal = Math.min(100, urgencyPoints);
 
   const classification: AnalysisResult["classification"] =
-    riskScore < 30 ? "Safe" : riskScore < 65 ? "Suspicious" : "High Risk";
+    riskScore <= 30 ? "Safe" : riskScore <= 60 ? "Suspicious" : "High Risk";
 
   const allPhrases = [...new Set([...scam.hits, ...urgency.hits, ...ai.hits, ...india.hits])];
   const allExplanations = [...scam.explanations, ...urgency.explanations, ...ai.explanations, ...india.explanations, ...stylometryExplanations];
@@ -542,21 +572,13 @@ export function analyzeText(text: string): AnalysisResult {
 
   const signals: AnalysisSignals = {
     ai_generated: aiScore,
-    scam_keywords: scamScore,
-    emotional_manipulation: emoScore,
+    scam_keywords: scamSignal,
+    emotional_manipulation: emoSignal,
   };
 
-  // Readability
   const readability = analyzeReadability(text);
-
-  // Language detection
   const language = detectLanguage(text);
 
-  // URL analysis
-  const urls = extractURLs(text);
-  const url_analysis = urls.map(u => analyzeURL(u));
-
-  // Confidence: higher when more indicators are found
   const totalIndicators = allExplanations.length;
   const confidence = totalIndicators === 0
     ? (classification === "Safe" ? 85 : 50)
@@ -598,25 +620,53 @@ export async function analyzeImage(file: File): Promise<ImageAnalysisResult> {
   metadata["File Type"] = file.type;
   metadata["Last Modified"] = new Date(file.lastModified).toLocaleDateString();
 
+  // ── 1. File-level checks ──
   if (file.size > 5 * 1024 * 1024) {
-    indicators.push("Large file size — uncommon for AI-generated images");
     score -= 5;
+    indicators.push("✅ Large file size — uncommon for AI-generated images");
+  } else if (file.size < 200 * 1024 && file.type === "image/jpeg") {
+    score += 8;
+    indicators.push("Small JPEG file — AI outputs are often compressed");
+  }
+
+  if (file.type === "image/png") {
+    score += 5;
+    indicators.push("PNG format — commonly used by AI generators");
+  }
+  if (file.type === "image/webp") {
+    score += 5;
+    indicators.push("WebP format — often used in AI pipelines");
   }
 
   const img = await loadImage(file);
   metadata["Dimensions"] = `${img.width} × ${img.height}`;
   metadata["Aspect Ratio"] = (img.width / img.height).toFixed(2);
+  metadata["Total Pixels"] = `${(img.width * img.height / 1000000).toFixed(1)}MP`;
 
+  // ── 2. Dimension analysis ──
   const commonAIDims = [
     [512, 512], [768, 768], [1024, 1024], [1024, 768], [768, 1024],
     [1920, 1080], [1080, 1920], [1344, 768], [768, 1344],
+    [2048, 2048], [1536, 1536], [896, 1152], [1152, 896],
+    [2048, 1024], [1024, 2048], [1792, 1024], [1024, 1792],
   ];
   const isCommonAIDim = commonAIDims.some(([w, h]) => img.width === w && img.height === h);
   if (isCommonAIDim) {
-    score += 15;
-    indicators.push(`Dimensions (${img.width}×${img.height}) match common AI generator output sizes`);
+    score += 18;
+    indicators.push(`Dimensions (${img.width}×${img.height}) match common AI generator sizes`);
   }
 
+  if (img.width % 64 === 0 && img.height % 64 === 0 && !isCommonAIDim) {
+    score += 10;
+    indicators.push("Dimensions are multiples of 64 — typical of AI model alignment");
+  }
+
+  if (img.width === img.height && img.width >= 512) {
+    score += 8;
+    indicators.push("Perfect square aspect ratio — common in AI-generated images");
+  }
+
+  // ── 3. Pixel analysis ──
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d")!;
   canvas.width = Math.min(img.width, 256);
@@ -624,70 +674,146 @@ export async function analyzeImage(file: File): Promise<ImageAnalysisResult> {
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
+  const totalPixels = canvas.width * canvas.height;
 
-  const colorHistogram = new Array(256).fill(0);
+  // Color histogram
+  const histGray = new Array(256).fill(0);
   for (let i = 0; i < pixels.length; i += 4) {
     const gray = Math.round(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]);
-    colorHistogram[gray]++;
+    histGray[gray]++;
   }
 
-  const totalPixels = canvas.width * canvas.height;
-  const maxBin = Math.max(...colorHistogram);
-  const dominance = maxBin / totalPixels;
-  if (dominance > 0.15) {
+  const maxGray = Math.max(...histGray);
+  if (maxGray / totalPixels > 0.12) {
+    score += 12;
+    indicators.push("Unusual color uniformity — may indicate AI generation");
+  }
+
+  // Smooth histogram check
+  let emptyBins = 0;
+  for (let i = 10; i < 245; i++) { if (histGray[i] === 0) emptyBins++; }
+  if (emptyBins < 15 && totalPixels > 10000) {
     score += 10;
-    indicators.push("Unusual color uniformity detected — may indicate AI generation");
+    indicators.push("Very smooth color distribution — AI images rarely have histogram gaps");
   }
 
-  let smoothTransitions = 0;
-  let totalTransitions = 0;
+  // Smooth transitions
+  let smoothTransitions = 0, totalTransitions = 0, mediumTransitions = 0;
   for (let i = 4; i < pixels.length; i += 4) {
     const diff = Math.abs(pixels[i] - pixels[i - 4]) + Math.abs(pixels[i + 1] - pixels[i - 3]) + Math.abs(pixels[i + 2] - pixels[i - 2]);
-    if (diff < 10) smoothTransitions++;
+    if (diff < 8) smoothTransitions++;
+    if (diff < 20) mediumTransitions++;
     totalTransitions++;
   }
-  const smoothRatio = smoothTransitions / totalTransitions;
-  if (smoothRatio > 0.7) {
-    score += 12;
-    indicators.push("High proportion of smooth color transitions — characteristic of AI-generated imagery");
+  if (smoothTransitions / totalTransitions > 0.65) {
+    score += 14;
+    indicators.push("High proportion of smooth transitions — characteristic of AI imagery");
+  } else if (mediumTransitions / totalTransitions > 0.8) {
+    score += 10;
+    indicators.push("Gradual color transitions dominate — typical of diffusion-model outputs");
   }
 
   // Edge sharpness
   let sharpEdges = 0;
   for (let i = 4; i < pixels.length; i += 4) {
     const diff = Math.abs(pixels[i] - pixels[i - 4]) + Math.abs(pixels[i + 1] - pixels[i - 3]) + Math.abs(pixels[i + 2] - pixels[i - 2]);
-    if (diff > 100) sharpEdges++;
+    if (diff > 80) sharpEdges++;
   }
-  if (totalTransitions > 0 && sharpEdges / totalTransitions < 0.02) {
-    score += 8;
-    indicators.push("Very few sharp edges — AI images tend to have smoother boundaries");
+  if (totalTransitions > 0 && sharpEdges / totalTransitions < 0.03) {
+    score += 10;
+    indicators.push("Very few sharp edges — AI images have unnaturally smooth boundaries");
   }
 
+  // Color channel correlation
+  let meanR = 0, meanG = 0, meanB = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    meanR += pixels[i]; meanG += pixels[i + 1]; meanB += pixels[i + 2];
+  }
+  meanR /= totalPixels; meanG /= totalPixels; meanB /= totalPixels;
+
+  let sumRG = 0, sumRB = 0, sumR2 = 0, sumG2 = 0, sumB2 = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    const dr = pixels[i] - meanR, dg = pixels[i + 1] - meanG, db = pixels[i + 2] - meanB;
+    sumRG += dr * dg; sumRB += dr * db;
+    sumR2 += dr * dr; sumG2 += dg * dg; sumB2 += db * db;
+  }
+  const corrRG = sumR2 > 0 && sumG2 > 0 ? sumRG / Math.sqrt(sumR2 * sumG2) : 0;
+  const corrRB = sumR2 > 0 && sumB2 > 0 ? sumRB / Math.sqrt(sumR2 * sumB2) : 0;
+  const avgCorr = (Math.abs(corrRG) + Math.abs(corrRB)) / 2;
+
+  if (avgCorr > 0.92) {
+    score += 12;
+    indicators.push("Extremely high color channel correlation — typical of AI imagery");
+  } else if (avgCorr > 0.85) {
+    score += 6;
+    indicators.push("High color channel correlation — may suggest AI generation");
+  }
+
+  // Noise pattern analysis
+  const noiseValues: number[] = [];
+  for (let i = 4; i < pixels.length; i += 4) {
+    noiseValues.push(Math.abs(pixels[i] - pixels[i - 4]));
+  }
+  if (noiseValues.length > 100) {
+    const noiseMean = noiseValues.reduce((a, b) => a + b, 0) / noiseValues.length;
+    const noiseVar = noiseValues.reduce((s, v) => s + Math.pow(v - noiseMean, 2), 0) / noiseValues.length;
+    if (Math.sqrt(noiseVar) < 5 && noiseMean < 8) {
+      score += 12;
+      indicators.push("Unnaturally uniform noise — hallmark of AI-generated images");
+    }
+  }
+
+  // Texture region analysis
+  if (canvas.width >= 128 && canvas.height >= 128) {
+    const regionSize = 32;
+    const positions = [[0, 0], [canvas.width - regionSize, 0], [0, canvas.height - regionSize], [canvas.width - regionSize, canvas.height - regionSize]];
+    const avgVars: number[] = [];
+    for (const [rx, ry] of positions) {
+      const rd = ctx.getImageData(rx, ry, regionSize, regionSize);
+      const avg = Array.from(rd.data).filter((_, i) => i % 4 < 3).reduce((a, b) => a + b, 0) / (regionSize * regionSize * 3);
+      const v = Array.from(rd.data).filter((_, i) => i % 4 < 3).reduce((s, val) => s + Math.pow(val - avg, 2), 0) / (regionSize * regionSize * 3);
+      avgVars.push(Math.sqrt(v));
+    }
+    const meanVar = avgVars.reduce((a, b) => a + b, 0) / avgVars.length;
+    const varOfVar = avgVars.reduce((s, v) => s + Math.pow(v - meanVar, 2), 0) / avgVars.length;
+    if (varOfVar < 50) {
+      score += 8;
+      indicators.push("Uniform texture across regions — consistent with AI generation");
+    }
+  }
+
+  // ── 4. EXIF metadata ──
   const hasExifMarker = await checkForExif(file);
   if (!hasExifMarker) {
-    score += 10;
-    indicators.push("No EXIF metadata found — AI-generated images typically lack camera metadata");
+    score += 15;
+    indicators.push("No EXIF metadata — AI images lack camera data");
   } else {
-    score -= 10;
-    indicators.push("EXIF metadata present — suggests real camera capture");
+    score -= 15;
+    indicators.push("✅ EXIF metadata present — suggests real camera capture");
   }
 
-  const aiPatterns = /\b(dalle|midjourney|stable.?diffusion|sd_|comfyui|a1111|generated|ai_|artificial|deepfake)\b/i;
+  // ── 5. Filename ──
+  const aiPatterns = /\b(dalle|dall-e|midjourney|stable.?diffusion|sd_|sdxl|comfyui|a1111|generated|ai_|ai-|artificial|deepfake|flux|leonardo|firefly|imagen|ideogram)\b/i;
   if (aiPatterns.test(file.name)) {
-    score += 20;
+    score += 25;
     indicators.push("Filename contains AI tool references");
+  }
+  if (/^(image|download|IMG)[\s_-]?\d{3,}/i.test(file.name)) {
+    score += 5;
+    indicators.push("Generic filename — common from AI platforms");
   }
 
   score = Math.max(0, Math.min(100, score));
 
   const classification: ImageAnalysisResult["classification"] =
-    score < 25 ? "Likely Authentic" : score < 55 ? "Possibly AI-Generated" : "Likely AI-Generated";
+    score <= 25 ? "Likely Authentic" : score <= 50 ? "Possibly AI-Generated" : "Likely AI-Generated";
 
   const tips: string[] = [];
-  if (score >= 25) {
-    tips.push("Use Google Reverse Image Search to check if this image appears elsewhere online.");
-    tips.push("Look for subtle artifacts: irregular fingers, asymmetric earrings, blurred text.");
-    tips.push("Check if the image source is a verified, credible publisher.");
+  if (score > 25) {
+    tips.push("Use Google Reverse Image Search to verify origin.");
+    tips.push("Zoom in: check fingers, earrings, text, and background consistency.");
+    tips.push("Check source credibility — where was this published?");
+    tips.push("Look for inconsistent lighting and shadow directions.");
   }
   tips.push("AI image detection is probabilistic — no tool is 100% accurate.");
 

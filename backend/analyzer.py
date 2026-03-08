@@ -1,19 +1,22 @@
-"""TruthShield – Enhanced Text Analysis Module
+"""TruthShield – Enhanced Text & Image Analysis Module v3.0
 
 Multi-factor NLP analyzer with explainable output:
-  1. Scam keyword presence (global + India-specific)
+  1. Weighted scam keyword scoring (scam +15, urgency +10, financial +20, links +25)
   2. Emotional / urgency manipulation
   3. AI-generated content probability (patterns + stylometry)
   4. Per-phrase explanations
   5. Summary and safety tips
+  6. Image analysis via heuristics
 """
 
 from __future__ import annotations
 import re
 import math
+import struct
 from dataclasses import dataclass, field
+from typing import Optional
 
-# ── Keyword banks with explanations ────────────────────────────────────────────
+# ── Keyword banks ────────────────────────────────────────────────────────────
 
 SCAM_KEYWORDS: list[dict] = [
     {"phrase": "congratulations", "reason": "Unsolicited congratulations are a classic phishing opener.", "severity": "medium"},
@@ -135,6 +138,21 @@ INDIA_SCAM_PATTERNS: list[dict] = [
     {"phrase": "electricity bill", "reason": "Fake disconnection threats = payment fraud.", "severity": "high"},
 ]
 
+FINANCIAL_PHRASES = [
+    "bank account", "wire transfer", "send money", "processing fee", "credit card",
+    "debit card", "social security", "western union", "money gram", "bitcoin",
+    "cryptocurrency", "investment opportunity", "double your money", "gift card",
+    "upi", "paytm", "phonepe", "google pay", "sbi", "hdfc", "icici",
+    "aadhaar", "pan card", "otp", "share otp", "kyc update",
+]
+
+SCAM_WEIGHT = 15
+URGENCY_WEIGHT = 10
+FINANCIAL_WEIGHT = 20
+LINK_WEIGHT = 25
+
+
+# ── Data classes ──
 
 @dataclass
 class Explanation:
@@ -156,6 +174,18 @@ class AnalysisResult:
     tips: list[str] = field(default_factory=list)
 
 
+@dataclass
+class ImageAnalysisResult:
+    ai_generated_probability: float = 0.0
+    classification: str = "Likely Authentic"
+    explanation: list[dict] = field(default_factory=list)
+    risk_score: int = 0
+    metadata: dict = field(default_factory=dict)
+    tips: list[str] = field(default_factory=list)
+
+
+# ── Helper functions ──
+
 def _find_matches(text_lower: str, bank: list[dict], category: str):
     hits = []
     explanations = []
@@ -171,10 +201,6 @@ def _find_matches(text_lower: str, bank: list[dict], category: str):
     return hits, explanations
 
 
-def _score_from_hits(hits: list[str], weight: int) -> int:
-    return min(100, len(hits) * weight)
-
-
 def _highlight(original_text: str, phrases: list[str]) -> str:
     result = original_text
     for phrase in phrases:
@@ -184,7 +210,6 @@ def _highlight(original_text: str, phrases: list[str]) -> str:
 
 
 def _stylometric_analysis(text: str) -> tuple[int, list[dict]]:
-    """Analyze writing style patterns typical of AI-generated content."""
     score = 0
     indicators = []
 
@@ -197,92 +222,67 @@ def _stylometric_analysis(text: str) -> tuple[int, list[dict]]:
 
         if std_dev < 3 and len(sentences) > 4:
             score += 15
-            indicators.append({
-                "category": "ai",
-                "phrase": "(stylometric pattern)",
-                "reason": "Unusually uniform sentence length — typical of AI-generated text.",
-                "severity": "medium",
-            })
+            indicators.append({"category": "ai", "phrase": "(stylometric)", "reason": "Unusually uniform sentence length.", "severity": "medium"})
 
         if 14 < avg_len < 26:
             score += 8
-            indicators.append({
-                "category": "ai",
-                "phrase": "(stylometric pattern)",
-                "reason": "Average sentence length falls in the AI-typical range (15-25 words).",
-                "severity": "low",
-            })
+            indicators.append({"category": "ai", "phrase": "(stylometric)", "reason": "Average sentence length in AI-typical range.", "severity": "low"})
 
-    # Excessive hedging
     hedges = ["however", "nevertheless", "nonetheless", "on the other hand", "that being said", "it should be noted"]
-    hedge_count = sum(1 for h in hedges if h in text.lower())
-    if hedge_count >= 3:
+    if sum(1 for h in hedges if h in text.lower()) >= 3:
         score += 10
-        indicators.append({
-            "category": "ai",
-            "phrase": "(stylometric pattern)",
-            "reason": "Excessive hedging language — characteristic of AI writing style.",
-            "severity": "medium",
-        })
+        indicators.append({"category": "ai", "phrase": "(stylometric)", "reason": "Excessive hedging language.", "severity": "medium"})
 
-    # Lack of contractions
     words = text.split()
     contractions = len(re.findall(r"\b\w+'\w+\b", text))
     if len(words) > 50 and (contractions / len(words)) < 0.005:
         score += 8
-        indicators.append({
-            "category": "ai",
-            "phrase": "(stylometric pattern)",
-            "reason": "Very few contractions — overly formal style typical of AI.",
-            "severity": "low",
-        })
+        indicators.append({"category": "ai", "phrase": "(stylometric)", "reason": "Very few contractions — overly formal.", "severity": "low"})
 
     return min(40, score), indicators
 
 
 def _generate_summary(classification: str, signals: dict, explanations: list[dict]) -> str:
     if classification == "Safe":
-        return "This content appears safe. No significant scam indicators, AI-generation patterns, or emotional manipulation detected."
+        return "This content appears safe. No significant indicators detected."
 
     parts = []
-    if signals.get("scam_keywords", 0) > 30:
-        parts.append("scam-related keywords")
-    if signals.get("ai_generated", 0) > 30:
-        parts.append("AI-generated content patterns")
-    if signals.get("emotional_manipulation", 0) > 30:
-        parts.append("emotional manipulation tactics")
-    india_hits = [e for e in explanations if e["category"] == "india_scam"]
-    if india_hits:
-        parts.append("India-specific fraud patterns")
+    if signals.get("scam_keywords", 0) > 30: parts.append("scam keywords")
+    if signals.get("ai_generated", 0) > 30: parts.append("AI-generated patterns")
+    if signals.get("emotional_manipulation", 0) > 30: parts.append("emotional manipulation")
+    india_hits = [e for e in explanations if e.get("category") == "india_scam"]
+    if india_hits: parts.append("India-specific fraud patterns")
 
-    high_count = sum(1 for e in explanations if e["severity"] == "high")
+    high_count = sum(1 for e in explanations if e.get("severity") == "high")
 
     if classification == "High Risk":
-        return f"⚠️ HIGH RISK: Contains {', '.join(parts)}. {high_count} high-severity indicators found. Do NOT share personal info or transfer money."
-    return f"⚡ SUSPICIOUS: Shows signs of {', '.join(parts)}. Verify the source before acting."
+        return f"⚠️ HIGH RISK: Contains {', '.join(parts)}. {high_count} high-severity indicators. Do NOT share info or transfer money."
+    return f"⚡ SUSPICIOUS: Shows signs of {', '.join(parts)}. Verify source before acting."
 
 
 def _generate_tips(classification: str, explanations: list[dict]) -> list[str]:
     tips = []
     if classification == "Safe":
-        tips.append("Always stay vigilant — even safe-looking content can be deceptive.")
+        tips.append("Always stay vigilant.")
         return tips
 
-    categories = set(e["category"] for e in explanations)
+    categories = set(e.get("category", "") for e in explanations)
     if "scam" in categories or "india_scam" in categories:
-        tips.append("Never share personal info (Aadhaar, PAN, OTP, passwords) via messages.")
-        tips.append("Verify sender identity through official channels.")
+        tips.append("Never share personal info (Aadhaar, PAN, OTP) via messages.")
+        tips.append("Verify sender through official channels.")
         tips.append("Do not click links in suspicious messages.")
     if "urgency" in categories:
-        tips.append("Legitimate organizations don't create artificial urgency — take your time.")
+        tips.append("Legitimate orgs don't create artificial urgency.")
     if "ai" in categories:
         tips.append("Cross-check AI-generated claims with reliable sources.")
-    tips.append("When in doubt, consult a trusted person before acting.")
+    tips.append("When in doubt, consult a trusted person.")
     return tips[:5]
 
 
+# ── Main Text Analysis ──
+
 def analyze_text(text: str) -> AnalysisResult:
-    """Run enhanced heuristic + stylometric analysis."""
+    """Run weighted heuristic + stylometric analysis."""
     lower = text.lower()
 
     scam_hits, scam_expl = _find_matches(lower, SCAM_KEYWORDS, "scam")
@@ -290,43 +290,202 @@ def analyze_text(text: str) -> AnalysisResult:
     ai_hits, ai_expl = _find_matches(lower, AI_PATTERNS, "ai")
     india_hits, india_expl = _find_matches(lower, INDIA_SCAM_PATTERNS, "india_scam")
 
-    scam_score = _score_from_hits(scam_hits + india_hits, 14)
-    emo_score = _score_from_hits(urgency_hits, 18)
+    # Weighted scoring
+    all_scam_hits = scam_hits + india_hits
+    financial_hits = [h for h in all_scam_hits if h in FINANCIAL_PHRASES]
+    regular_scam_hits = [h for h in all_scam_hits if h not in FINANCIAL_PHRASES]
 
-    # AI score includes stylometric analysis
+    scam_points = len(regular_scam_hits) * SCAM_WEIGHT + len(financial_hits) * FINANCIAL_WEIGHT
+    urgency_points = len(urgency_hits) * URGENCY_WEIGHT
+
     stylo_score, stylo_indicators = _stylometric_analysis(text)
-    ai_base = _score_from_hits(ai_hits, 16)
+    ai_base = min(100, len(ai_hits) * 16)
     ai_score = min(100, ai_base + stylo_score)
 
-    risk_score = min(100, round(ai_score * 0.3 + scam_score * 0.4 + emo_score * 0.3))
+    raw_score = scam_points + urgency_points + round(ai_score * 0.3)
+    risk_score = max(0, min(100, raw_score))
 
-    if risk_score < 30:
+    scam_signal = min(100, scam_points)
+    emo_signal = min(100, urgency_points)
+
+    if risk_score <= 30:
         classification = "Safe"
-    elif risk_score < 65:
+    elif risk_score <= 60:
         classification = "Suspicious"
     else:
         classification = "High Risk"
 
     all_phrases = list(set(scam_hits + urgency_hits + ai_hits + india_hits))
     all_explanations = scam_expl + urgency_expl + ai_expl + india_expl + stylo_indicators
-    highlighted = _highlight(text, all_phrases)
 
     signals = {
         "ai_generated": ai_score,
-        "scam_keywords": scam_score,
-        "emotional_manipulation": emo_score,
+        "scam_keywords": scam_signal,
+        "emotional_manipulation": emo_signal,
     }
-
-    summary = _generate_summary(classification, signals, all_explanations)
-    tips = _generate_tips(classification, all_explanations)
 
     return AnalysisResult(
         risk_score=risk_score,
         classification=classification,
         signals=signals,
         suspicious_phrases=all_phrases,
-        highlighted_text=highlighted,
+        highlighted_text=_highlight(text, all_phrases),
         explanations=all_explanations,
-        summary=summary,
+        summary=_generate_summary(classification, signals, all_explanations),
+        tips=_generate_tips(classification, all_explanations),
+    )
+
+
+# ── Image Analysis ──
+
+def analyze_image(image_data: bytes, filename: str = "", content_type: str = "") -> ImageAnalysisResult:
+    """Analyze image bytes for AI-generation indicators using heuristics."""
+    indicators = []
+    score = 0
+    metadata = {}
+
+    metadata["file_size"] = f"{len(image_data) / 1024:.1f} KB"
+    metadata["content_type"] = content_type or "unknown"
+
+    # 1. File size heuristics
+    if len(image_data) > 5 * 1024 * 1024:
+        score -= 5
+        indicators.append({"signal": "Large file size — uncommon for AI", "weight": -5, "type": "positive"})
+    elif len(image_data) < 200 * 1024 and "jpeg" in content_type:
+        score += 8
+        indicators.append({"signal": "Small JPEG — AI outputs are often compressed", "weight": 8, "type": "negative"})
+
+    if "png" in content_type:
+        score += 5
+        indicators.append({"signal": "PNG format — commonly used by AI generators", "weight": 5, "type": "negative"})
+    if "webp" in content_type:
+        score += 5
+        indicators.append({"signal": "WebP format — often used in AI pipelines", "weight": 5, "type": "negative"})
+
+    # 2. EXIF check (look for 0xFFE1 marker in JPEG)
+    has_exif = False
+    for i in range(min(len(image_data) - 1, 65536)):
+        if image_data[i] == 0xFF and image_data[i + 1] == 0xE1:
+            has_exif = True
+            break
+
+    if not has_exif:
+        score += 15
+        indicators.append({"signal": "No EXIF metadata — AI images lack camera data", "weight": 15, "type": "negative"})
+    else:
+        score -= 15
+        indicators.append({"signal": "EXIF metadata present — suggests real camera", "weight": -15, "type": "positive"})
+
+    # 3. Dimension analysis (try to read from image header)
+    width, height = _get_image_dimensions(image_data, content_type)
+    if width and height:
+        metadata["dimensions"] = f"{width} × {height}"
+
+        common_ai_dims = [
+            (512, 512), (768, 768), (1024, 1024), (1024, 768), (768, 1024),
+            (1920, 1080), (1080, 1920), (1344, 768), (768, 1344),
+            (2048, 2048), (1536, 1536), (896, 1152), (1152, 896),
+            (2048, 1024), (1024, 2048), (1792, 1024), (1024, 1792),
+        ]
+        if (width, height) in common_ai_dims:
+            score += 18
+            indicators.append({"signal": f"Dimensions ({width}×{height}) match AI generator sizes", "weight": 18, "type": "negative"})
+
+        if width % 64 == 0 and height % 64 == 0 and (width, height) not in common_ai_dims:
+            score += 10
+            indicators.append({"signal": "Dimensions are multiples of 64 — AI model alignment", "weight": 10, "type": "negative"})
+
+        if width == height and width >= 512:
+            score += 8
+            indicators.append({"signal": "Perfect square aspect ratio — common in AI images", "weight": 8, "type": "negative"})
+
+    # 4. Filename analysis
+    ai_patterns = re.compile(r'\b(dalle|dall-e|midjourney|stable.?diffusion|sd_|sdxl|comfyui|generated|ai_|ai-|deepfake|flux|leonardo|firefly|imagen)\b', re.IGNORECASE)
+    if ai_patterns.search(filename):
+        score += 25
+        indicators.append({"signal": "Filename contains AI tool references", "weight": 25, "type": "negative"})
+
+    if re.match(r'^(image|download|IMG)[\s_-]?\d{3,}', filename, re.IGNORECASE):
+        score += 5
+        indicators.append({"signal": "Generic filename — common from AI platforms", "weight": 5, "type": "negative"})
+
+    # 5. Byte-level analysis (compression patterns)
+    # Check for unusually uniform byte distribution (AI images tend to be smoother)
+    if len(image_data) > 1000:
+        sample = image_data[100:min(len(image_data), 10100)]
+        byte_hist = [0] * 256
+        for b in sample:
+            byte_hist[b] += 1
+        max_freq = max(byte_hist)
+        min_freq = min(b for b in byte_hist if b > 0) if any(b > 0 for b in byte_hist) else 0
+        if max_freq > 0 and min_freq > 0:
+            uniformity = min_freq / max_freq
+            if uniformity > 0.3:
+                score += 8
+                indicators.append({"signal": "Uniform byte distribution — may indicate AI generation", "weight": 8, "type": "negative"})
+
+    # Clamp
+    score = max(0, min(100, score))
+
+    if score <= 25:
+        classification = "Likely Authentic"
+    elif score <= 50:
+        classification = "Possibly AI-Generated"
+    else:
+        classification = "Likely AI-Generated"
+
+    tips = []
+    if score > 25:
+        tips.append("Use Google Reverse Image Search to verify origin.")
+        tips.append("Zoom in: check fingers, earrings, text, backgrounds.")
+        tips.append("Check source credibility.")
+        tips.append("Look for inconsistent lighting and shadows.")
+    tips.append("AI detection is probabilistic — no tool is 100% accurate.")
+
+    return ImageAnalysisResult(
+        ai_generated_probability=score / 100.0,
+        classification=classification,
+        explanation=indicators,
+        risk_score=score,
+        metadata=metadata,
         tips=tips,
     )
+
+
+def _get_image_dimensions(data: bytes, content_type: str) -> tuple[Optional[int], Optional[int]]:
+    """Try to extract image dimensions from binary data."""
+    try:
+        # PNG: bytes 16-23 contain width and height as 4-byte big-endian
+        if data[:4] == b'\x89PNG':
+            width = struct.unpack('>I', data[16:20])[0]
+            height = struct.unpack('>I', data[20:24])[0]
+            return width, height
+
+        # JPEG: scan for SOF markers
+        if data[:2] == b'\xff\xd8':
+            i = 2
+            while i < len(data) - 9:
+                if data[i] == 0xFF:
+                    marker = data[i + 1]
+                    if marker in (0xC0, 0xC1, 0xC2):
+                        height = struct.unpack('>H', data[i + 5:i + 7])[0]
+                        width = struct.unpack('>H', data[i + 7:i + 9])[0]
+                        return width, height
+                    elif marker == 0xD9:
+                        break
+                    else:
+                        length = struct.unpack('>H', data[i + 2:i + 4])[0]
+                        i += 2 + length
+                else:
+                    i += 1
+
+        # WebP
+        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            if data[12:16] == b'VP8 ':
+                width = struct.unpack('<H', data[26:28])[0] & 0x3FFF
+                height = struct.unpack('<H', data[28:30])[0] & 0x3FFF
+                return width, height
+
+    except Exception:
+        pass
+    return None, None
