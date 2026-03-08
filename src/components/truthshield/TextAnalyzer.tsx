@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Shield, Send, Loader2, RotateCcw, FileText, Globe, BookOpen, Link2, TrendingUp } from "lucide-react";
 import { analyzeText, type AnalysisResult } from "@/lib/analyzer";
 import { addToHistory } from "./AnalysisHistory";
+import { recordAnalysis } from "@/lib/analysisStore";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
 import RiskGauge from "./RiskGauge";
 import SignalBars from "./SignalBars";
