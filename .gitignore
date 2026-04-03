@@ -1,3 +1,9 @@
+# Environment / secrets
+.env
+backend/.env
+**/__pycache__/
+*.py[cod]
+
 # Logs
 logs
 *.log

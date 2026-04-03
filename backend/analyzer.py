@@ -1,20 +1,59 @@
-"""TruthShield – Enhanced Text & Image Analysis Module v3.0
+"""TruthShield – Enhanced Text & Image Analysis Module v5.1
 
-Multi-factor NLP analyzer with explainable output:
-  1. Weighted scam keyword scoring (scam +15, urgency +10, financial +20, links +25)
-  2. Emotional / urgency manipulation
-  3. AI-generated content probability (patterns + stylometry)
-  4. Per-phrase explanations
-  5. Summary and safety tips
-  6. Image analysis via heuristics
+Primary engine: Google Gemini 1.5 Flash via google-genai SDK (LLM-based zero-shot classification)
+Fallback engine: Weighted keyword heuristics + stylometric analysis
+
+Environment variables (see .env.example):
+  GEMINI_API_KEY – API key from https://aistudio.google.com/app/apikey
 """
 
 from __future__ import annotations
 import re
+import os
+import json
 import math
 import struct
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
+# Load .env if present (no-op when env vars are already set)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+logger = logging.getLogger(__name__)
+
+# ── Gemini client (initialised lazily) ───────────────────────────────────────
+
+_gemini_client = None
+
+
+def _get_client():
+    """Return a cached google-genai Client, or None if the API key is missing."""
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
+
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        logger.warning(
+            "GEMINI_API_KEY not set. "
+            "Get a free key from https://aistudio.google.com/app/apikey. "
+            "Falling back to keyword-based heuristics."
+        )
+        return None
+
+    try:
+        from google import genai
+        _gemini_client = genai.Client(api_key=api_key)
+        return _gemini_client
+    except Exception as exc:
+        logger.error("Failed to initialise Gemini client: %s", exc)
+        return None
 
 # ── Keyword banks ────────────────────────────────────────────────────────────
 
@@ -279,10 +318,163 @@ def _generate_tips(classification: str, explanations: list[dict]) -> list[str]:
     return tips[:5]
 
 
+# ── Gemini Text Analysis ──
+
+_TEXT_SYSTEM_PROMPT = """You are TruthGuard, an expert cybersecurity AI specialising in detecting scams, phishing, AI-generated text, emotional manipulation, and India-specific digital fraud (UPI, KYC, Aadhaar, OTP scams, etc.).
+
+Analyse the user-provided text and return ONLY a valid JSON object (no markdown, no prose) with exactly this structure:
+
+{
+  "risk_score": <integer 0-100>,
+  "classification": "<Safe|Suspicious|High Risk>",
+  "signals": {
+    "ai_generated": <integer 0-100>,
+    "scam_keywords": <integer 0-100>,
+    "emotional_manipulation": <integer 0-100>
+  },
+  "suspicious_phrases": [<list of suspicious phrases found verbatim in the text>],
+  "highlighted_text": "<full original text with suspicious spans wrapped in <mark>…</mark>>",
+  "explanations": [
+    {"category": "<scam|urgency|ai|india_scam>", "phrase": "<phrase>", "reason": "<why it is suspicious>", "severity": "<low|medium|high>"}
+  ],
+  "summary": "<1–2 sentence human-readable summary>",
+  "tips": [<list of 2–5 actionable safety tips relevant to this text>]
+}
+
+Scoring guide:
+- risk_score 0-30 → Safe, 31-60 → Suspicious, 61-100 → High Risk
+- signals values are independent sub-scores (0-100 each)
+- For India-specific patterns (Aadhaar, PAN, OTP, UPI, KYC, SBI, HDFC, ICICI, RBI, crore, lakh) use category "india_scam"
+- Keep suspicious_phrases as exact substrings from the input text
+- highlighted_text must be the FULL original text, only adding <mark> tags around suspicious parts"""
+
+
+def _gpt_analyze_text(text: str) -> Optional[AnalysisResult]:
+    """Call Gemini to analyse text. Returns None on any failure."""
+    client = _get_client()
+    if client is None:
+        return None
+
+    try:
+        from google.genai import types
+
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=text,
+            config=types.GenerateContentConfig(
+                system_instruction=_TEXT_SYSTEM_PROMPT,
+                temperature=0.1,
+                max_output_tokens=1500,
+                response_mime_type="application/json",
+            ),
+        )
+
+        data = json.loads(response.text or "{}")
+
+        signals = data.get("signals", {})
+        if not isinstance(signals, dict):
+            signals = {}
+        signals.setdefault("ai_generated", 0)
+        signals.setdefault("scam_keywords", 0)
+        signals.setdefault("emotional_manipulation", 0)
+
+        return AnalysisResult(
+            risk_score=int(data.get("risk_score", 0)),
+            classification=data.get("classification", "Safe"),
+            signals=signals,
+            suspicious_phrases=data.get("suspicious_phrases", []) if isinstance(data.get("suspicious_phrases"), list) else [],
+            highlighted_text=data.get("highlighted_text", text) if isinstance(data.get("highlighted_text"), str) else text,
+            explanations=data.get("explanations", []) if isinstance(data.get("explanations"), list) else [],
+            summary=data.get("summary", "") if isinstance(data.get("summary"), str) else "",
+            tips=data.get("tips", []) if isinstance(data.get("tips"), list) else [],
+        )
+    except Exception as exc:
+        logger.error("Gemini text analysis failed: %s", exc)
+        return None
+
+
+# ── Gemini Image Analysis ──
+
+_IMAGE_SYSTEM_PROMPT = """You are TruthGuard Vision, an expert in detecting AI-generated images (DALL-E, Midjourney, Stable Diffusion, etc.) and manipulated media.
+
+Analyse the provided image and return ONLY a valid JSON object (no markdown, no prose) with exactly this structure:
+
+{
+  "ai_generated_probability": <float 0.0-1.0>,
+  "risk_score": <integer 0-100>,
+  "classification": "<Likely Authentic|Possibly AI-Generated|Likely AI-Generated>",
+  "explanation": [
+    {"signal": "<observation>", "weight": <integer, positive=towards AI, negative=towards authentic>, "type": "<positive|negative>"}
+  ],
+  "metadata": {"notes": "<brief technical notes>"},
+  "tips": [<list of 2–4 actionable tips for the user>]
+}
+
+Classification guide:
+- ai_generated_probability 0.0–0.25 → Likely Authentic
+- 0.26–0.60 → Possibly AI-Generated
+- 0.61–1.0 → Likely AI-Generated
+
+Look for: unnatural skin textures, impossible anatomy (extra fingers, distorted ears), unrealistic lighting, floating objects, garbled text, overly smooth backgrounds, watermarks from AI tools, and other tell-tale signs."""
+
+
+def _gpt_analyze_image(image_data: bytes, content_type: str) -> Optional[ImageAnalysisResult]:
+    """Call Gemini Vision to analyse an image. Returns None on any failure."""
+    client = _get_client()
+    if client is None:
+        return None
+
+    mime = content_type if content_type else "image/jpeg"
+
+    try:
+        from google.genai import types
+
+        image_part = types.Part.from_bytes(data=image_data, mime_type=mime)
+        text_part = types.Part.from_text(text="Analyse this image for AI-generation indicators.")
+
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=[image_part, text_part],
+            config=types.GenerateContentConfig(
+                system_instruction=_IMAGE_SYSTEM_PROMPT,
+                temperature=0.1,
+                max_output_tokens=800,
+                response_mime_type="application/json",
+            ),
+        )
+
+        data = json.loads(response.text or "{}")
+
+        prob = float(data.get("ai_generated_probability", 0.0))
+        risk = int(data.get("risk_score", int(prob * 100)))
+
+        return ImageAnalysisResult(
+            ai_generated_probability=prob,
+            classification=data.get("classification", "Likely Authentic"),
+            explanation=data.get("explanation", []),
+            risk_score=risk,
+            metadata=data.get("metadata", {}),
+            tips=data.get("tips", []),
+        )
+    except Exception as exc:
+        logger.error("Gemini image analysis failed: %s", exc)
+        return None
+
+
 # ── Main Text Analysis ──
 
 def analyze_text(text: str) -> AnalysisResult:
-    """Run weighted heuristic + stylometric analysis."""
+    """Analyse text using Gemini 1.5 Flash (with keyword-heuristic fallback)."""
+    # Primary: Gemini
+    result = _gpt_analyze_text(text)
+    if result is not None:
+        return result
+
+    # Fallback: keyword-based heuristics
+    return _heuristic_analyze_text(text)
+
+
+def _heuristic_analyze_text(text: str) -> AnalysisResult:
     lower = text.lower()
 
     scam_hits, scam_expl = _find_matches(lower, SCAM_KEYWORDS, "scam")
@@ -339,6 +531,23 @@ def analyze_text(text: str) -> AnalysisResult:
 # ── Image Analysis ──
 
 def analyze_image(image_data: bytes, filename: str = "", content_type: str = "") -> ImageAnalysisResult:
+    """Analyse an image using Gemini 1.5 Flash Vision (with heuristic fallback)."""
+    # Primary: Gemini 1.5 Flash Vision
+    result = _gpt_analyze_image(image_data, content_type)
+    if result is not None:
+        # Enrich metadata with file info that Gemini doesn't see
+        result.metadata["file_size"] = f"{len(image_data) / 1024:.1f} KB"
+        result.metadata["content_type"] = content_type or "unknown"
+        width, height = _get_image_dimensions(image_data, content_type)
+        if width and height:
+            result.metadata["dimensions"] = f"{width} × {height}"
+        return result
+
+    # Fallback: byte-level heuristics
+    return _heuristic_analyze_image(image_data, filename, content_type)
+
+
+def _heuristic_analyze_image(image_data: bytes, filename: str = "", content_type: str = "") -> ImageAnalysisResult:
     """Analyze image bytes for AI-generation indicators using heuristics."""
     indicators = []
     score = 0
