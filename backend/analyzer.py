@@ -1,6 +1,6 @@
-"""TruthShield – Enhanced Text & Image Analysis Module v5.0
+"""TruthShield – Enhanced Text & Image Analysis Module v5.1
 
-Primary engine: Google Gemini 1.5 Flash (LLM-based zero-shot classification)
+Primary engine: Google Gemini 1.5 Flash via google-genai SDK (LLM-based zero-shot classification)
 Fallback engine: Weighted keyword heuristics + stylometric analysis
 
 Environment variables (see .env.example):
@@ -28,14 +28,14 @@ logger = logging.getLogger(__name__)
 
 # ── Gemini client (initialised lazily) ───────────────────────────────────────
 
-_gemini_model = None
+_gemini_client = None
 
 
 def _get_client():
-    """Return a cached Gemini GenerativeModel, or None if the API key is missing."""
-    global _gemini_model
-    if _gemini_model is not None:
-        return _gemini_model
+    """Return a cached google-genai Client, or None if the API key is missing."""
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
 
     api_key = os.getenv("GEMINI_API_KEY")
 
@@ -48,10 +48,9 @@ def _get_client():
         return None
 
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-        return _gemini_model
+        from google import genai
+        _gemini_client = genai.Client(api_key=api_key)
+        return _gemini_client
     except Exception as exc:
         logger.error("Failed to initialise Gemini client: %s", exc)
         return None
@@ -352,23 +351,25 @@ Scoring guide:
 
 def _gpt_analyze_text(text: str) -> Optional[AnalysisResult]:
     """Call Gemini to analyse text. Returns None on any failure."""
-    model = _get_client()
-    if model is None:
+    client = _get_client()
+    if client is None:
         return None
 
-    prompt = f"{_TEXT_SYSTEM_PROMPT}\n\nText to analyse:\n{text}"
-
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.1, "max_output_tokens": 1500},
+        from google.genai import types
+
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=text,
+            config=types.GenerateContentConfig(
+                system_instruction=_TEXT_SYSTEM_PROMPT,
+                temperature=0.1,
+                max_output_tokens=1500,
+                response_mime_type="application/json",
+            ),
         )
 
-        raw = response.text or ""
-        # Strip markdown code fences if present
-        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-        raw = re.sub(r"\s*```$", "", raw.strip())
-        data = json.loads(raw)
+        data = json.loads(response.text or "{}")
 
         signals = data.get("signals", {})
         if not isinstance(signals, dict):
@@ -419,26 +420,30 @@ Look for: unnatural skin textures, impossible anatomy (extra fingers, distorted 
 
 def _gpt_analyze_image(image_data: bytes, content_type: str) -> Optional[ImageAnalysisResult]:
     """Call Gemini Vision to analyse an image. Returns None on any failure."""
-    model = _get_client()
-    if model is None:
+    client = _get_client()
+    if client is None:
         return None
 
     mime = content_type if content_type else "image/jpeg"
 
     try:
-        import google.generativeai as genai
-        image_part = {"mime_type": mime, "data": image_data}
+        from google.genai import types
 
-        response = model.generate_content(
-            [_IMAGE_SYSTEM_PROMPT, image_part, "Analyse this image for AI-generation indicators."],
-            generation_config={"temperature": 0.1, "max_output_tokens": 800},
+        image_part = types.Part.from_bytes(data=image_data, mime_type=mime)
+        text_part = types.Part.from_text(text="Analyse this image for AI-generation indicators.")
+
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=[image_part, text_part],
+            config=types.GenerateContentConfig(
+                system_instruction=_IMAGE_SYSTEM_PROMPT,
+                temperature=0.1,
+                max_output_tokens=800,
+                response_mime_type="application/json",
+            ),
         )
 
-        raw = response.text or ""
-        # Strip markdown code fences if present
-        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-        raw = re.sub(r"\s*```$", "", raw.strip())
-        data = json.loads(raw)
+        data = json.loads(response.text or "{}")
 
         prob = float(data.get("ai_generated_probability", 0.0))
         risk = int(data.get("risk_score", int(prob * 100)))
