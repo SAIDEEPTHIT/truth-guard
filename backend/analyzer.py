@@ -1,12 +1,10 @@
-"""TruthShield – Enhanced Text & Image Analysis Module v4.0
+"""TruthShield – Enhanced Text & Image Analysis Module v5.0
 
-Primary engine: Azure OpenAI GPT-4 / GPT-4o (LLM-based zero-shot classification)
+Primary engine: Google Gemini 1.5 Flash (LLM-based zero-shot classification)
 Fallback engine: Weighted keyword heuristics + stylometric analysis
 
 Environment variables (see .env.example):
-  AZURE_OPENAI_ENDPOINT       – e.g. https://<resource>.openai.azure.com/
-  AZURE_OPENAI_KEY            – API key
-  AZURE_OPENAI_DEPLOYMENT_NAME – deployment name (e.g. gpt-4o)
+  GEMINI_API_KEY – API key from https://aistudio.google.com/app/apikey
 """
 
 from __future__ import annotations
@@ -14,7 +12,6 @@ import re
 import os
 import json
 import math
-import base64
 import struct
 import logging
 from dataclasses import dataclass, field
@@ -29,39 +26,34 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ── Azure OpenAI client (initialised lazily) ─────────────────────────────────
+# ── Gemini client (initialised lazily) ───────────────────────────────────────
 
-_openai_client = None
-_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+_gemini_model = None
 
 
 def _get_client():
-    """Return a cached AzureOpenAI client, or None if credentials are missing."""
-    global _openai_client
-    if _openai_client is not None:
-        return _openai_client
+    """Return a cached Gemini GenerativeModel, or None if the API key is missing."""
+    global _gemini_model
+    if _gemini_model is not None:
+        return _gemini_model
 
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    key = os.getenv("AZURE_OPENAI_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
 
-    if not endpoint or not key:
+    if not api_key:
         logger.warning(
-            "Azure OpenAI credentials not set. "
-            "Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY to enable GPT-4 analysis. "
+            "GEMINI_API_KEY not set. "
+            "Get a free key from https://aistudio.google.com/app/apikey. "
             "Falling back to keyword-based heuristics."
         )
         return None
 
     try:
-        from openai import AzureOpenAI
-        _openai_client = AzureOpenAI(
-            azure_endpoint=endpoint,
-            api_key=key,
-            api_version="2024-02-01",
-        )
-        return _openai_client
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+        return _gemini_model
     except Exception as exc:
-        logger.error("Failed to initialise Azure OpenAI client: %s", exc)
+        logger.error("Failed to initialise Gemini client: %s", exc)
         return None
 
 # ── Keyword banks ────────────────────────────────────────────────────────────
@@ -327,7 +319,7 @@ def _generate_tips(classification: str, explanations: list[dict]) -> list[str]:
     return tips[:5]
 
 
-# ── GPT-4 Text Analysis ──
+# ── Gemini Text Analysis ──
 
 _TEXT_SYSTEM_PROMPT = """You are TruthGuard, an expert cybersecurity AI specialising in detecting scams, phishing, AI-generated text, emotional manipulation, and India-specific digital fraud (UPI, KYC, Aadhaar, OTP scams, etc.).
 
@@ -359,24 +351,23 @@ Scoring guide:
 
 
 def _gpt_analyze_text(text: str) -> Optional[AnalysisResult]:
-    """Call Azure OpenAI to analyse text. Returns None on any failure."""
-    client = _get_client()
-    if client is None:
+    """Call Gemini to analyse text. Returns None on any failure."""
+    model = _get_client()
+    if model is None:
         return None
 
+    prompt = f"{_TEXT_SYSTEM_PROMPT}\n\nText to analyse:\n{text}"
+
     try:
-        response = client.chat.completions.create(
-            model=_DEPLOYMENT,
-            messages=[
-                {"role": "system", "content": _TEXT_SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            temperature=0.1,
-            max_tokens=1500,
-            response_format={"type": "json_object"},
+        response = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.1, "max_output_tokens": 1500},
         )
 
-        raw = response.choices[0].message.content or ""
+        raw = response.text or ""
+        # Strip markdown code fences if present
+        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        raw = re.sub(r"\s*```$", "", raw.strip())
         data = json.loads(raw)
 
         signals = data.get("signals", {})
@@ -397,11 +388,11 @@ def _gpt_analyze_text(text: str) -> Optional[AnalysisResult]:
             tips=data.get("tips", []) if isinstance(data.get("tips"), list) else [],
         )
     except Exception as exc:
-        logger.error("GPT text analysis failed: %s", exc)
+        logger.error("Gemini text analysis failed: %s", exc)
         return None
 
 
-# ── GPT-4o Image Analysis ──
+# ── Gemini Image Analysis ──
 
 _IMAGE_SYSTEM_PROMPT = """You are TruthGuard Vision, an expert in detecting AI-generated images (DALL-E, Midjourney, Stable Diffusion, etc.) and manipulated media.
 
@@ -427,35 +418,26 @@ Look for: unnatural skin textures, impossible anatomy (extra fingers, distorted 
 
 
 def _gpt_analyze_image(image_data: bytes, content_type: str) -> Optional[ImageAnalysisResult]:
-    """Call Azure OpenAI GPT-4o Vision to analyse an image. Returns None on any failure."""
-    client = _get_client()
-    if client is None:
+    """Call Gemini Vision to analyse an image. Returns None on any failure."""
+    model = _get_client()
+    if model is None:
         return None
 
-    # GPT-4o vision requires base64 data URL
-    b64 = base64.b64encode(image_data).decode("utf-8")
     mime = content_type if content_type else "image/jpeg"
-    data_url = f"data:{mime};base64,{b64}"
 
     try:
-        response = client.chat.completions.create(
-            model=_DEPLOYMENT,
-            messages=[
-                {"role": "system", "content": _IMAGE_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                        {"type": "text", "text": "Analyse this image for AI-generation indicators."},
-                    ],
-                },
-            ],
-            temperature=0.1,
-            max_tokens=800,
-            response_format={"type": "json_object"},
+        import google.generativeai as genai
+        image_part = {"mime_type": mime, "data": image_data}
+
+        response = model.generate_content(
+            [_IMAGE_SYSTEM_PROMPT, image_part, "Analyse this image for AI-generation indicators."],
+            generation_config={"temperature": 0.1, "max_output_tokens": 800},
         )
 
-        raw = response.choices[0].message.content or ""
+        raw = response.text or ""
+        # Strip markdown code fences if present
+        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        raw = re.sub(r"\s*```$", "", raw.strip())
         data = json.loads(raw)
 
         prob = float(data.get("ai_generated_probability", 0.0))
@@ -470,15 +452,15 @@ def _gpt_analyze_image(image_data: bytes, content_type: str) -> Optional[ImageAn
             tips=data.get("tips", []),
         )
     except Exception as exc:
-        logger.error("GPT image analysis failed: %s", exc)
+        logger.error("Gemini image analysis failed: %s", exc)
         return None
 
 
 # ── Main Text Analysis ──
 
 def analyze_text(text: str) -> AnalysisResult:
-    """Analyse text using Azure OpenAI GPT-4 (with keyword-heuristic fallback)."""
-    # Primary: GPT-4
+    """Analyse text using Gemini 1.5 Flash (with keyword-heuristic fallback)."""
+    # Primary: Gemini
     result = _gpt_analyze_text(text)
     if result is not None:
         return result
@@ -544,11 +526,11 @@ def _heuristic_analyze_text(text: str) -> AnalysisResult:
 # ── Image Analysis ──
 
 def analyze_image(image_data: bytes, filename: str = "", content_type: str = "") -> ImageAnalysisResult:
-    """Analyse an image using Azure OpenAI GPT-4o Vision (with heuristic fallback)."""
-    # Primary: GPT-4o Vision
+    """Analyse an image using Gemini 1.5 Flash Vision (with heuristic fallback)."""
+    # Primary: Gemini 1.5 Flash Vision
     result = _gpt_analyze_image(image_data, content_type)
     if result is not None:
-        # Enrich metadata with file info that GPT doesn't see
+        # Enrich metadata with file info that Gemini doesn't see
         result.metadata["file_size"] = f"{len(image_data) / 1024:.1f} KB"
         result.metadata["content_type"] = content_type or "unknown"
         width, height = _get_image_dimensions(image_data, content_type)
