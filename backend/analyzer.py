@@ -464,13 +464,13 @@ def _gpt_analyze_image(image_data: bytes, content_type: str) -> Optional[ImageAn
 # ── Main Text Analysis ──
 
 def analyze_text(text: str) -> AnalysisResult:
-    """Analyse text using Gemini 1.5 Flash (with keyword-heuristic fallback)."""
-    # Primary: Gemini
     result = _gpt_analyze_text(text)
+
     if result is not None:
+        print("✅ USING GEMINI")
         return result
 
-    # Fallback: keyword-based heuristics
+    print("❌ USING FALLBACK (HEURISTICS)")
     return _heuristic_analyze_text(text)
 
 
