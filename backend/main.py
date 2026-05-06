@@ -1,4 +1,4 @@
-"""TruthShield – Enhanced FastAPI Backend v3.0
+"""TruthShield – FastAPI Backend v4.0 (OpenAI-Powered)
 
 Run:  uvicorn main:app --reload --port 8000
 """
@@ -12,8 +12,8 @@ from analyzer import analyze_text, analyze_image
 
 app = FastAPI(
     title="TruthShield API",
-    version="3.0.0",
-    description="Explainable AI API for detecting scams, AI-generated content, and manipulation with India-specific intelligence.",
+    version="4.0.0",
+    description="OpenAI-powered API for detecting scams, AI-generated content, and manipulation with India-specific intelligence.",
 )
 
 app.add_middleware(
@@ -46,6 +46,8 @@ class ExplanationResponse(BaseModel):
 class AnalyzeResponse(BaseModel):
     risk_score: int
     classification: str
+    scam_type: str
+    emotional_manipulation: bool
     signals: SignalsResponse
     suspicious_phrases: list[str]
     highlighted_text: str
@@ -73,12 +75,12 @@ class ImageAnalyzeResponse(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "TruthShield API", "version": "3.0.0"}
+    return {"status": "ok", "service": "TruthShield API", "version": "4.0.0"}
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
-    """Analyze text for scam indicators, AI patterns, emotional manipulation, and India-specific fraud."""
+    """Analyze text for scam indicators using OpenAI GPT-4o-mini with rule-based overrides."""
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text must not be empty")
@@ -88,6 +90,8 @@ def analyze(req: AnalyzeRequest):
     return AnalyzeResponse(
         risk_score=result.risk_score,
         classification=result.classification,
+        scam_type=result.scam_type,
+        emotional_manipulation=result.emotional_manipulation,
         signals=SignalsResponse(**result.signals),
         suspicious_phrases=result.suspicious_phrases,
         highlighted_text=result.highlighted_text,
@@ -121,4 +125,4 @@ async def analyze_image_endpoint(file: UploadFile = File(...)):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.0.0"}
+    return {"status": "healthy", "version": "4.0.0"}
