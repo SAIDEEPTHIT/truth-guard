@@ -80,7 +80,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
     const badgeColor =
       result.classification === "Likely Authentic" ? "#22c55e" :
-      result.classification === "Possibly AI-Generated" ? "#eab308" : "#ef4444";
+      result.classification === "Likely AI-Generated" ? "#ef4444" : "#eab308";
     chrome.action.setBadgeText({ text: String(result.risk_score) });
     chrome.action.setBadgeBackgroundColor({ color: badgeColor });
 
@@ -377,11 +377,71 @@ async function analyzeImageFromURL(imageUrl) {
 
   metadata["Source URL"] = imageUrl.length > 80 ? imageUrl.substring(0, 77) + "..." : imageUrl;
 
-  // Try backend first
+  // Try enhanced backend endpoint first
   try {
+    const imgResponse = await fetch(imageUrl);
+    const blob = await imgResponse.blob();
     const formData = new FormData();
+    formData.append("file", blob, "image.jpg");
+
+    const apiRes = await fetch(`${API_URL}/api/image/analyze-full`, {
+      method: "POST",
+      body: formData,
+    });
+    if (apiRes.ok) {
+      const apiResult = await apiRes.json();
+      // Map enhanced result to extension format
+      const allIndicators = [];
+      if (apiResult.metadataIndicators) {
+        apiResult.metadataIndicators.forEach(ind => {
+          allIndicators.push(`${ind.type === "green" ? "✅" : ind.type === "red" ? "🔴" : "⚠️"} ${ind.signal}`);
+        });
+      }
+      if (apiResult.pixelAnalysis && apiResult.pixelAnalysis.indicators) {
+        apiResult.pixelAnalysis.indicators.forEach(ind => {
+          allIndicators.push(`${ind.type === "green" ? "✅" : ind.type === "red" ? "🔴" : "⚠️"} ${ind.signal}`);
+        });
+      }
+      if (apiResult.flags) {
+        apiResult.flags.forEach(f => {
+          allIndicators.push(`${f.severity === "high" ? "🔴" : "⚠️"} ${f.label}: ${f.detail}`);
+        });
+      }
+
+      const enhancedMetadata = {};
+      if (apiResult.metadata) {
+        if (apiResult.metadata.width) enhancedMetadata["Dimensions"] = `${apiResult.metadata.width} × ${apiResult.metadata.height}`;
+        if (apiResult.metadata.fileSizeMB) enhancedMetadata["File Size"] = `${apiResult.metadata.fileSizeMB} MB`;
+        if (apiResult.metadata.cameraMake) enhancedMetadata["Camera"] = `${apiResult.metadata.cameraMake} ${apiResult.metadata.cameraModel || ""}`;
+        if (apiResult.metadata.software) enhancedMetadata["Software"] = apiResult.metadata.software;
+        if (apiResult.metadata.creationDate) enhancedMetadata["Created"] = apiResult.metadata.creationDate;
+        enhancedMetadata["EXIF"] = apiResult.metadata.hasMissingEXIF ? "❌ Missing" : "✅ Present";
+      }
+      enhancedMetadata["Source URL"] = metadata["Source URL"];
+
+      return {
+        risk_score: apiResult.riskScore,
+        classification: apiResult.classification === "Inconclusive" ? "Possibly AI-Generated" : apiResult.classification,
+        indicators: allIndicators.length > 0 ? allIndicators : ["Analysis complete — no strong indicators found"],
+        metadata: enhancedMetadata,
+        tips: apiResult.tips || ["AI detection is probabilistic — no tool is 100% accurate."],
+        type: "image",
+        enhanced: true,
+        confidence: apiResult.confidence,
+        recommendation: apiResult.recommendation,
+        aiScore: apiResult.aiDetection ? apiResult.aiDetection.score : 0,
+        aiAvailable: apiResult.aiDetection ? apiResult.aiDetection.available : false,
+      };
+    }
+  } catch (e) {
+    // Fall through to legacy analysis
+  }
+
+  // Try legacy backend endpoint
+  try {
     const response = await fetch(imageUrl);
     const blob = await response.blob();
+    const formData = new FormData();
     formData.append("file", blob, "image.jpg");
 
     const apiRes = await fetch(`${API_URL}/analyze-image`, {

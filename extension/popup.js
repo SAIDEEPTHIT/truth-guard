@@ -289,25 +289,50 @@ function renderTextResult(data, isSenior) {
 }
 
 function renderImageResult(data, isSenior) {
-  const { risk_score, classification, indicators, metadata, tips } = data;
+  const { risk_score, classification, indicators, metadata, tips, enhanced, confidence, recommendation, aiScore, aiAvailable } = data;
 
   const scoreEl = document.getElementById("score-circle");
   scoreEl.textContent = risk_score;
   const classEl = document.getElementById("classification");
   const statusEl = document.getElementById("status");
 
-  const riskClass = classification === "Likely Authentic" ? "safe" : classification === "Possibly AI-Generated" ? "suspicious" : "high-risk";
+  const riskClass = classification === "Likely Authentic" ? "safe" : classification === "Possibly AI-Generated" || classification === "Inconclusive" ? "suspicious" : "high-risk";
   scoreEl.className = `score-circle ${riskClass}`;
   classEl.className = `classification ${riskClass}`;
   classEl.textContent = isSenior
-    ? (classification === "Likely Authentic" ? "✅ Real Photo" : classification === "Possibly AI-Generated" ? "⚠️ Maybe Computer-Made" : "🚨 Probably Fake!")
+    ? (classification === "Likely Authentic" ? "✅ Real Photo" : classification === "Possibly AI-Generated" || classification === "Inconclusive" ? "⚠️ Maybe Computer-Made" : "🚨 Probably Fake!")
     : classification;
   statusEl.className = `card ${riskClass}`;
 
-  renderSeniorVerdict(classification === "Likely Authentic" ? "Safe" : classification === "Possibly AI-Generated" ? "Suspicious" : "High Risk", isSenior);
+  renderSeniorVerdict(classification === "Likely Authentic" ? "Safe" : classification === "Possibly AI-Generated" || classification === "Inconclusive" ? "Suspicious" : "High Risk", isSenior);
 
   // Hide text-specific tabs
   document.getElementById("tab-signals-content").style.display = "none";
+
+  // Show enhanced badge if available
+  if (enhanced) {
+    const summaryEl = document.getElementById("summary-container");
+    summaryEl.style.display = "block";
+    let summaryHtml = `<div style="text-align:center;margin-bottom:8px;">`;
+    summaryHtml += `<span style="display:inline-block;background:#3b82f620;color:#60a5fa;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:700;letter-spacing:0.5px;">🔬 ENHANCED AI DETECTION</span>`;
+    if (confidence) summaryHtml += `<br/><span style="font-size:11px;color:#a1a1aa;">Confidence: <strong style="color:#e4e4e7;">${confidence}%</strong></span>`;
+    if (aiAvailable) summaryHtml += `<br/><span style="font-size:11px;color:#a1a1aa;">AI Model Score: <strong style="color:${aiScore > 60 ? '#ef4444' : aiScore > 30 ? '#eab308' : '#22c55e'};">${aiScore}%</strong></span>`;
+    summaryHtml += `</div>`;
+    if (recommendation) {
+      summaryHtml += `<div style="padding:8px;border-radius:6px;background:${recommendation.color === 'red' ? '#ef444415' : recommendation.color === 'yellow' ? '#eab30815' : '#22c55e15'};border:1px solid ${recommendation.color === 'red' ? '#ef444440' : recommendation.color === 'yellow' ? '#eab30840' : '#22c55e40'};">`;
+      summaryHtml += `<strong>${recommendation.icon} ${recommendation.title}</strong><br/>`;
+      summaryHtml += `<span style="font-size:11px;color:#a1a1aa;">${recommendation.message}</span></div>`;
+    }
+    summaryEl.innerHTML = summaryHtml;
+  } else {
+    const summaryEl = document.getElementById("summary-container");
+    summaryEl.style.display = "block";
+    summaryEl.textContent = isSenior
+      ? (classification === "Likely Authentic"
+        ? "This image appears to be a real photograph."
+        : `This image has ${indicators.length} signs of being computer-generated. Be cautious!`)
+      : `Image analysis complete: ${classification}. ${indicators.length} indicators analyzed.`;
+  }
 
   // Show indicators as explanations
   const explContainer = document.getElementById("explanations-container");
@@ -316,7 +341,8 @@ function renderImageResult(data, isSenior) {
     indicators.forEach(ind => {
       const div = document.createElement("div");
       const isPositive = ind.startsWith("✅");
-      div.className = `explanation-item ${isPositive ? 'safe-indicator' : 'ai'}`;
+      const isRed = ind.startsWith("🔴");
+      div.className = `explanation-item ${isPositive ? 'safe-indicator' : isRed ? 'scam' : 'ai'}`;
       div.innerHTML = `<div class="reason">${ind}</div>`;
       explContainer.appendChild(div);
     });
@@ -330,15 +356,6 @@ function renderImageResult(data, isSenior) {
       `<div class="meta-item"><span>${k}</span><span class="meta-value">${v}</span></div>`
     ).join('');
   }
-
-  // Summary
-  const summaryEl = document.getElementById("summary-container");
-  summaryEl.style.display = "block";
-  summaryEl.textContent = isSenior
-    ? (classification === "Likely Authentic"
-      ? "This image appears to be a real photograph."
-      : `This image has ${indicators.length} signs of being computer-generated. Be cautious!`)
-    : `Image analysis complete: ${classification}. ${indicators.length} indicators analyzed.`;
 
   renderTips(tips, isSenior);
 

@@ -1,4 +1,4 @@
-"""TruthShield – FastAPI Backend v5.0 (OpenAI-Powered + Community Blocklist)
+"""TruthShield – FastAPI Backend v6.0 (OpenAI-Powered + Enhanced Image AI + Community Blocklist)
 
 Run:  uvicorn main:app --reload --port 8000
 """
@@ -9,6 +9,15 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from analyzer import analyze_text, analyze_image
+from image_analyzer import (
+    extract_exif_metadata,
+    score_metadata,
+    analyze_pixel_patterns,
+    call_huggingface_api,
+    generate_flags,
+    get_recommendation,
+    analyze_image_full,
+)
 from blocklist import (
     add_domain,
     get_blocklist,
@@ -22,8 +31,8 @@ from blocklist import (
 
 app = FastAPI(
     title="TruthShield API",
-    version="5.0.0",
-    description="OpenAI-powered API for detecting scams, AI-generated content, and manipulation with India-specific intelligence. Includes community domain blocklist.",
+    version="6.0.0",
+    description="OpenAI-powered API for detecting scams, AI-generated content, and manipulation with India-specific intelligence. Enhanced AI image detection with HuggingFace + pixel analysis. Community domain blocklist.",
 )
 
 app.add_middleware(
@@ -92,7 +101,7 @@ class AddDomainRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "TruthShield API", "version": "5.0.0"}
+    return {"status": "ok", "service": "TruthShield API", "version": "6.0.0"}
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -138,6 +147,45 @@ async def analyze_image_endpoint(file: UploadFile = File(...)):
         metadata=result.metadata,
         tips=result.tips,
     )
+
+
+# ── Enhanced Image Analysis Endpoints ──────────────────────────────────────────
+
+@app.post("/api/image/analyze-metadata")
+async def analyze_metadata_endpoint(file: UploadFile = File(...)):
+    """Extract and score image metadata for authenticity."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+    metadata = extract_exif_metadata(image_data, filename=file.filename or "")
+    meta_score = score_metadata(metadata)
+    return {"metadata": metadata, "metadataScore": meta_score["score"], "indicators": meta_score["indicators"]}
+
+
+@app.post("/api/image/analyze-ai")
+async def analyze_ai_endpoint(file: UploadFile = File(...)):
+    """Analyze pixel patterns and call HuggingFace AI classifier."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+    pixel = analyze_pixel_patterns(image_data)
+    hf = call_huggingface_api(image_data)
+    return {"pixelAnalysis": pixel, "aiDetection": hf}
+
+
+@app.post("/api/image/analyze-full")
+async def analyze_full_endpoint(file: UploadFile = File(...)):
+    """Comprehensive image analysis: metadata + pixel patterns + HuggingFace AI detection."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+    return analyze_image_full(image_data, filename=file.filename or "", content_type=file.content_type or "")
 
 
 # ── Blocklist Endpoints ───────────────────────────────────────────────────────
@@ -229,4 +277,4 @@ def blocklist_downvote(domain: str):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "5.0.0"}
+    return {"status": "healthy", "version": "6.0.0"}
