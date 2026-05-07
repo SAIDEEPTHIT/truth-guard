@@ -1,8 +1,9 @@
 import { Link, useLocation } from "react-router-dom";
-import { Shield, Menu, X, Eye } from "lucide-react";
+import { Shield, Menu, X, Eye, Flag } from "lucide-react";
 import { useState } from "react";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
 import { Switch } from "@/components/ui/switch";
+import BlocklistModal from "@/components/truthshield/BlocklistModal";
 
 const Navbar = () => {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -13,6 +14,7 @@ const Navbar = () => {
     { to: "/", label: "Home" },
     { to: "/analyze", label: "Analyze Text" },
     { to: "/image-analysis", label: "Analyze Image" },
+    { to: "/blocklist", label: "Blocklist" },
     { to: "/history", label: "History" },
     { to: "/dashboard", label: "Dashboard" },
   ];
@@ -45,6 +47,9 @@ const Navbar = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            <div className="hidden sm:block">
+              <BlocklistModal />
+            </div>
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-secondary/50">
               <Eye className="w-4 h-4 text-muted-foreground" />
               <span className="text-xs font-medium text-muted-foreground">Senior Mode</span>

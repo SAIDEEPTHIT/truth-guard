@@ -10,6 +10,9 @@ import Analyze from "./pages/Analyze";
 import ImageAnalysisPage from "./pages/ImageAnalysis";
 import HistoryPage from "./pages/History";
 import DashboardPage from "./pages/Dashboard";
+import Blocklist from "./pages/Blocklist";
+import DomainDetails from "./pages/DomainDetails";
+import BlocklistStats from "./pages/BlocklistStats";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -28,6 +31,9 @@ const App = () => (
             <Route path="/image-analysis" element={<ImageAnalysisPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/blocklist" element={<Blocklist />} />
+            <Route path="/blocklist/:domain" element={<DomainDetails />} />
+            <Route path="/blocklist-stats" element={<BlocklistStats />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
