@@ -149,6 +149,45 @@ async def analyze_image_endpoint(file: UploadFile = File(...)):
     )
 
 
+# ── Enhanced Image Analysis Endpoints ──────────────────────────────────────────
+
+@app.post("/api/image/analyze-metadata")
+async def analyze_metadata_endpoint(file: UploadFile = File(...)):
+    """Extract and score image metadata for authenticity."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+    metadata = extract_exif_metadata(image_data, filename=file.filename or "")
+    meta_score = score_metadata(metadata)
+    return {"metadata": metadata, "metadataScore": meta_score["score"], "indicators": meta_score["indicators"]}
+
+
+@app.post("/api/image/analyze-ai")
+async def analyze_ai_endpoint(file: UploadFile = File(...)):
+    """Analyze pixel patterns and call HuggingFace AI classifier."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+    pixel = analyze_pixel_patterns(image_data)
+    hf = call_huggingface_api(image_data)
+    return {"pixelAnalysis": pixel, "aiDetection": hf}
+
+
+@app.post("/api/image/analyze-full")
+async def analyze_full_endpoint(file: UploadFile = File(...)):
+    """Comprehensive image analysis: metadata + pixel patterns + HuggingFace AI detection."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+    return analyze_image_full(image_data, filename=file.filename or "", content_type=file.content_type or "")
+
+
 # ── Blocklist Endpoints ───────────────────────────────────────────────────────
 
 @app.get("/api/blocklist/stats")
