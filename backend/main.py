@@ -277,4 +277,4 @@ def blocklist_downvote(domain: str):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "5.0.0"}
+    return {"status": "healthy", "version": "6.0.0"}
