@@ -196,6 +196,22 @@ def blocklist_downvote(domain: str):
     return result
 
 
+@app.get("/api/blocklist/check")
+def blocklist_check(domain: str = Query(..., min_length=1)):
+    """Quick check if a domain is in the community blocklist (used by extension auto-warn)."""
+    result = get_domain_details(domain)
+    if not result:
+        return {"blocked": False, "domain": domain}
+    return {
+        "blocked": True,
+        "domain": result["domain"],
+        "threat_type": result["threat_type"],
+        "report_count": result["report_count"],
+        "upvotes": result["upvotes"],
+        "downvotes": result["downvotes"],
+    }
+
+
 @app.post("/api/blocklist/seed")
 def blocklist_seed():
     """Seed demo data for presentation."""

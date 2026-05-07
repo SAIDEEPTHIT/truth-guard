@@ -281,13 +281,77 @@
       color: #60a5fa; margin-left: 6px;
       font-weight: 600;
     }
+
+    /* ── Report Domain Section ── */
+    .domain-card {
+      background: linear-gradient(135deg, #1a1b23, #1e1f2a);
+      border: 1px solid #27272a; border-radius: 10px;
+      padding: 12px; margin-bottom: 10px;
+    }
+    .domain-card .domain-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+      color: #71717a; margin-bottom: 4px;
+    }
+    .domain-card .domain-name {
+      font-size: 14px; font-weight: 700; color: #e4e4e7;
+      font-family: monospace; word-break: break-all;
+    }
+    .domain-card .domain-name.blocked { color: #ef4444; }
+    .domain-blocked-badge {
+      display: inline-block; background: #ef444420; color: #ef4444;
+      font-size: 10px; font-weight: 700; padding: 2px 8px;
+      border-radius: 4px; margin-top: 4px; text-transform: uppercase;
+    }
+    .btn-report {
+      width: 100%; padding: 10px; margin-top: 6px;
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+      color: #fff; border: none; border-radius: 8px;
+      font-weight: 700; font-size: 13px; cursor: pointer;
+      transition: all 0.2s; letter-spacing: 0.5px;
+    }
+    .btn-report:hover { transform: translateY(-1px); box-shadow: 0 4px 15px rgba(239,68,68,0.4); }
+    .btn-report:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+    .report-modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      z-index: 1000; align-items: center; justify-content: center;
+    }
+    .report-modal-overlay.active { display: flex; }
+    .report-modal {
+      background: #1a1b23; border: 1px solid #3f3f46;
+      border-radius: 12px; padding: 20px; width: 380px;
+      animation: modalIn 0.2s ease-out;
+    }
+    @keyframes modalIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    .report-modal h3 { font-size: 15px; margin-bottom: 12px; color: #e4e4e7; }
+    .report-modal label { font-size: 11px; color: #71717a; display: block; margin-bottom: 4px; margin-top: 10px; }
+    .report-modal select, .report-modal textarea {
+      width: 100%; padding: 8px; background: #0f1117; color: #e4e4e7;
+      border: 1px solid #27272a; border-radius: 6px; font-size: 12px;
+      font-family: inherit;
+    }
+    .report-modal textarea { height: 60px; resize: none; }
+    .report-modal .modal-buttons { display: flex; gap: 8px; margin-top: 14px; }
+    .report-modal .btn-submit-report {
+      flex: 1; padding: 8px; background: #ef4444; color: #fff;
+      border: none; border-radius: 6px; font-weight: 700; cursor: pointer;
+    }
+    .report-modal .btn-cancel-report {
+      padding: 8px 14px; background: #27272a; color: #a1a1aa;
+      border: 1px solid #3f3f46; border-radius: 6px; cursor: pointer;
+    }
+    .report-success {
+      display: none; text-align: center; padding: 10px;
+      background: #22c55e15; border: 1px solid #22c55e40;
+      border-radius: 8px; margin-top: 6px; font-size: 12px; color: #4ade80;
+    }
   </style>
 </head>
 <body>
   <div class="header">
     <div class="header-left">
       <div class="shield-icon">🛡️</div>
-      <h1>TruthShield <span class="version-badge">v2.1</span></h1>
+      <h1>TruthShield <span class="version-badge">v3.0</span></h1>
     </div>
     <div class="toggle-row">
       <label>👴 Senior</label>
@@ -365,6 +429,39 @@
   </div>
 
   <button id="clear-btn" class="btn-clear" style="display:none;">Clear Results</button>
+
+  <!-- Domain Report Section -->
+  <div id="domain-section" class="domain-card">
+    <div class="domain-label">🌐 Current Website</div>
+    <div class="domain-name" id="current-domain">Detecting...</div>
+    <div id="domain-status"></div>
+    <button id="report-btn" class="btn-report" style="display:none;">🚨 Report Current Site</button>
+    <div id="report-success" class="report-success">
+      ✅ Domain reported successfully! Other TruthShield users will now be protected.
+    </div>
+  </div>
+
+  <!-- Report Modal -->
+  <div id="report-modal" class="report-modal-overlay">
+    <div class="report-modal">
+      <h3>🚨 Report Suspicious Domain</h3>
+      <div style="font-family:monospace;font-size:13px;color:#ef4444;margin-bottom:8px;" id="modal-domain-name"></div>
+      <label>Threat Type</label>
+      <select id="report-threat-type">
+        <option value="Phishing">🎣 Phishing</option>
+        <option value="Job Scam">💼 Job Scam</option>
+        <option value="Lottery">🎰 Lottery Scam</option>
+        <option value="Financial Fraud">💰 Financial Fraud</option>
+        <option value="Other">❓ Other</option>
+      </select>
+      <label>Description (optional)</label>
+      <textarea id="report-description" placeholder="Describe why this site is suspicious..."></textarea>
+      <div class="modal-buttons">
+        <button class="btn-cancel-report" id="report-cancel">Cancel</button>
+        <button class="btn-submit-report" id="report-submit">Submit Report</button>
+      </div>
+    </div>
+  </div>
 
   <script src="popup.js"></script>
 </body>

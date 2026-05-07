@@ -105,3 +105,16 @@ export async function fetchBlocklistStats(): Promise<BlocklistStats> {
 export async function seedDemoData(): Promise<{ success: boolean; message: string }> {
   return apiFetch("/api/blocklist/seed", { method: "POST" });
 }
+
+export interface DomainCheckResult {
+  blocked: boolean;
+  domain: string;
+  threat_type?: string;
+  report_count?: number;
+  upvotes?: number;
+  downvotes?: number;
+}
+
+export async function checkDomain(domain: string): Promise<DomainCheckResult> {
+  return apiFetch(`/api/blocklist/check?domain=${encodeURIComponent(domain)}`);
+}
