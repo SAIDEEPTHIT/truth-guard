@@ -47,6 +47,9 @@ const Navbar = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            <div className="hidden sm:block">
+              <BlocklistModal />
+            </div>
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-secondary/50">
               <Eye className="w-4 h-4 text-muted-foreground" />
               <span className="text-xs font-medium text-muted-foreground">Senior Mode</span>
