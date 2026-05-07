@@ -169,9 +169,40 @@ def blocklist_list(
     return get_blocklist(limit, offset, threat_type, sort, search)
 
 
+@app.get("/api/blocklist/check")
+def blocklist_check(domain: str = Query(..., min_length=1)):
+    """Quick check if a domain is in the community blocklist (used by extension auto-warn).
+    IMPORTANT: This must be defined BEFORE /{domain:path} to avoid route conflicts."""
+    result = get_domain_details(domain)
+    if not result:
+        return {"blocked": False, "domain": domain}
+    return {
+        "blocked": True,
+        "domain": result["domain"],
+        "threat_type": result["threat_type"],
+        "report_count": result["report_count"],
+        "upvotes": result["upvotes"],
+        "downvotes": result["downvotes"],
+    }
+
+
+@app.get("/api/blocklist/stats")
+def blocklist_stats_detail():
+    """Return overall blocklist statistics (alternate path)."""
+    return get_stats()
+
+
+@app.post("/api/blocklist/seed")
+def blocklist_seed():
+    """Seed demo data for presentation."""
+    seed_demo_data()
+    return {"success": True, "message": "Demo data seeded"}
+
+
 @app.get("/api/blocklist/{domain:path}")
 def blocklist_domain_details(domain: str):
-    """Get detailed info for a specific domain."""
+    """Get detailed info for a specific domain.
+    NOTE: This catch-all route MUST be defined AFTER /check, /stats, /seed."""
     result = get_domain_details(domain)
     if not result:
         raise HTTPException(status_code=404, detail="Domain not found")
@@ -194,29 +225,6 @@ def blocklist_downvote(domain: str):
     if not result["success"]:
         raise HTTPException(status_code=404, detail=result["message"])
     return result
-
-
-@app.get("/api/blocklist/check")
-def blocklist_check(domain: str = Query(..., min_length=1)):
-    """Quick check if a domain is in the community blocklist (used by extension auto-warn)."""
-    result = get_domain_details(domain)
-    if not result:
-        return {"blocked": False, "domain": domain}
-    return {
-        "blocked": True,
-        "domain": result["domain"],
-        "threat_type": result["threat_type"],
-        "report_count": result["report_count"],
-        "upvotes": result["upvotes"],
-        "downvotes": result["downvotes"],
-    }
-
-
-@app.post("/api/blocklist/seed")
-def blocklist_seed():
-    """Seed demo data for presentation."""
-    seed_demo_data()
-    return {"success": True, "message": "Demo data seeded"}
 
 
 @app.get("/health")
