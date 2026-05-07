@@ -1,8 +1,9 @@
 import { Link, useLocation } from "react-router-dom";
-import { Shield, Menu, X, Eye } from "lucide-react";
+import { Shield, Menu, X, Eye, Flag } from "lucide-react";
 import { useState } from "react";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
 import { Switch } from "@/components/ui/switch";
+import BlocklistModal from "@/components/truthshield/BlocklistModal";
 
 const Navbar = () => {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -13,6 +14,7 @@ const Navbar = () => {
     { to: "/", label: "Home" },
     { to: "/analyze", label: "Analyze Text" },
     { to: "/image-analysis", label: "Analyze Image" },
+    { to: "/blocklist", label: "Blocklist" },
     { to: "/history", label: "History" },
     { to: "/dashboard", label: "Dashboard" },
   ];
