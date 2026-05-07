@@ -1,5 +1,5 @@
-// TruthShield Enhanced Popup Script v2.1
-// Handles: Text, Image, and URL analysis results
+// TruthShield Enhanced Popup Script v3.0
+// Handles: Text, Image, URL analysis + Domain Reporting
 
 document.addEventListener("DOMContentLoaded", () => {
   // ── Senior Mode (use chrome.storage.local for persistence) ──
@@ -48,6 +48,82 @@ document.addEventListener("DOMContentLoaded", () => {
     chrome.storage.local.remove(["truthshield_result", "truthshield_loading", "truthshield_mode"]);
     chrome.action.setBadgeText({ text: "" });
     resetUI();
+  });
+
+  // ── Domain Detection & Reporting ──
+  let currentHostname = null;
+
+  chrome.runtime.sendMessage({ type: "truthshield_get_current_tab" }, (response) => {
+    const domainEl = document.getElementById("current-domain");
+    const reportBtn = document.getElementById("report-btn");
+    const domainStatus = document.getElementById("domain-status");
+
+    if (response && response.hostname) {
+      currentHostname = response.hostname;
+      domainEl.textContent = currentHostname;
+
+      // Check if already blocked
+      fetch(`${getApiUrl()}/api/blocklist/check?domain=${encodeURIComponent(currentHostname)}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.blocked) {
+            domainEl.classList.add("blocked");
+            domainStatus.innerHTML = `<span class="domain-blocked-badge">⚠️ Reported ${data.report_count}x — ${data.threat_type}</span>`;
+            reportBtn.style.display = "block";
+            reportBtn.textContent = "🚨 Report Again";
+          } else {
+            reportBtn.style.display = "block";
+          }
+        })
+        .catch(() => {
+          reportBtn.style.display = "block";
+        });
+    } else {
+      domainEl.textContent = "Unable to detect";
+      domainEl.style.color = "#71717a";
+    }
+  });
+
+  // Report button opens modal
+  document.getElementById("report-btn").addEventListener("click", () => {
+    if (!currentHostname) return;
+    document.getElementById("modal-domain-name").textContent = currentHostname;
+    document.getElementById("report-modal").classList.add("active");
+  });
+
+  document.getElementById("report-cancel").addEventListener("click", () => {
+    document.getElementById("report-modal").classList.remove("active");
+  });
+
+  document.getElementById("report-submit").addEventListener("click", () => {
+    if (!currentHostname) return;
+    const threatType = document.getElementById("report-threat-type").value;
+    const description = document.getElementById("report-description").value;
+    const submitBtn = document.getElementById("report-submit");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Submitting...";
+
+    chrome.runtime.sendMessage({
+      type: "truthshield_report_domain",
+      domain: currentHostname,
+      threat_type: threatType,
+      description: description,
+    }, (response) => {
+      document.getElementById("report-modal").classList.remove("active");
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Submit Report";
+
+      if (response && response.success) {
+        document.getElementById("report-success").style.display = "block";
+        document.getElementById("report-btn").style.display = "none";
+        setTimeout(() => {
+          document.getElementById("report-success").style.display = "none";
+        }, 5000);
+      } else {
+        const errorMsg = response?.data?.detail || response?.error || "Failed to report domain";
+        alert("Report failed: " + errorMsg);
+      }
+    });
   });
 });
 
