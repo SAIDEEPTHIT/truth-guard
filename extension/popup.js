@@ -1,7 +1,7 @@
-// TruthShield Enhanced Popup Script v3.0
-// Handles: Text, Image, URL analysis + Domain Reporting
+// TruthShield Enhanced Popup Script v4.0
+// Handles: Text, Image, URL analysis + Domain Reporting + Community Warnings
 
-function getApiUrl() { return "https://truth-guard-1.onrender.com"; }
+function getApiUrl() { return TRUTHSHIELD_CONFIG.API_BASE; }
 
 document.addEventListener("DOMContentLoaded", () => {
   // ── Senior Mode (use chrome.storage.local for persistence) ──

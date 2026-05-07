@@ -1,7 +1,7 @@
 // TruthShield – Blocklist API Client
 // Connects to the FastAPI backend for domain blocklist operations
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL || "https://truth-guard-1.onrender.com";
 
 export interface BlockedDomain {
   id: string;
