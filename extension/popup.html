@@ -351,7 +351,7 @@
   <div class="header">
     <div class="header-left">
       <div class="shield-icon">🛡️</div>
-      <h1>TruthShield <span class="version-badge">v2.1</span></h1>
+      <h1>TruthShield <span class="version-badge">v3.0</span></h1>
     </div>
     <div class="toggle-row">
       <label>👴 Senior</label>
@@ -429,6 +429,39 @@
   </div>
 
   <button id="clear-btn" class="btn-clear" style="display:none;">Clear Results</button>
+
+  <!-- Domain Report Section -->
+  <div id="domain-section" class="domain-card">
+    <div class="domain-label">🌐 Current Website</div>
+    <div class="domain-name" id="current-domain">Detecting...</div>
+    <div id="domain-status"></div>
+    <button id="report-btn" class="btn-report" style="display:none;">🚨 Report Current Site</button>
+    <div id="report-success" class="report-success">
+      ✅ Domain reported successfully! Other TruthShield users will now be protected.
+    </div>
+  </div>
+
+  <!-- Report Modal -->
+  <div id="report-modal" class="report-modal-overlay">
+    <div class="report-modal">
+      <h3>🚨 Report Suspicious Domain</h3>
+      <div style="font-family:monospace;font-size:13px;color:#ef4444;margin-bottom:8px;" id="modal-domain-name"></div>
+      <label>Threat Type</label>
+      <select id="report-threat-type">
+        <option value="Phishing">🎣 Phishing</option>
+        <option value="Job Scam">💼 Job Scam</option>
+        <option value="Lottery">🎰 Lottery Scam</option>
+        <option value="Financial Fraud">💰 Financial Fraud</option>
+        <option value="Other">❓ Other</option>
+      </select>
+      <label>Description (optional)</label>
+      <textarea id="report-description" placeholder="Describe why this site is suspicious..."></textarea>
+      <div class="modal-buttons">
+        <button class="btn-cancel-report" id="report-cancel">Cancel</button>
+        <button class="btn-submit-report" id="report-submit">Submit Report</button>
+      </div>
+    </div>
+  </div>
 
   <script src="popup.js"></script>
 </body>
