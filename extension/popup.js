@@ -1,6 +1,8 @@
 // TruthShield Enhanced Popup Script v3.0
 // Handles: Text, Image, URL analysis + Domain Reporting
 
+function getApiUrl() { return "https://truth-guard-1.onrender.com"; }
+
 document.addEventListener("DOMContentLoaded", () => {
   // ── Senior Mode (use chrome.storage.local for persistence) ──
   const seniorToggle = document.getElementById("senior-toggle");
