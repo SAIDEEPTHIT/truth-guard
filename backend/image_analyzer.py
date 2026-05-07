@@ -1,0 +1,686 @@
+"""TruthShield – Enhanced AI Image Detection Module v2.0
+
+Combines: EXIF metadata extraction, pixel-level analysis, HuggingFace AI classifier.
+Graceful fallback if HuggingFace API is unavailable.
+"""
+
+import io
+import os
+import math
+import struct
+import logging
+from typing import Optional
+
+import numpy as np
+
+try:
+    import piexif
+except ImportError:
+    piexif = None
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+import requests as http_requests
+
+logger = logging.getLogger(__name__)
+
+
+# ── 1. EXIF Metadata Extraction ──────────────────────────────────────────────
+
+def extract_exif_metadata(image_bytes: bytes, filename: str = "") -> dict:
+    """Extract EXIF metadata from image bytes."""
+    metadata = {
+        "filename": filename,
+        "fileSize": len(image_bytes),
+        "fileSizeMB": round(len(image_bytes) / (1024 * 1024), 2),
+        "hasMissingEXIF": True,
+        "cameraMake": None,
+        "cameraModel": None,
+        "lensModel": None,
+        "software": None,
+        "creationDate": None,
+        "modifyDate": None,
+        "iso": None,
+        "aperture": None,
+        "shutterSpeed": None,
+        "focalLength": None,
+        "gpsLatitude": None,
+        "gpsLongitude": None,
+        "orientation": None,
+        "colorSpace": None,
+        "width": None,
+        "height": None,
+    }
+
+    # Try to get dimensions from PIL
+    if Image:
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            metadata["width"] = img.width
+            metadata["height"] = img.height
+            metadata["colorSpace"] = img.mode
+        except Exception:
+            pass
+
+    # Try piexif
+    if piexif:
+        try:
+            exif_dict = piexif.load(image_bytes)
+
+            def _get(ifd, tag):
+                val = exif_dict.get(ifd, {}).get(tag)
+                if isinstance(val, bytes):
+                    return val.decode("utf-8", errors="ignore").strip("\x00 ")
+                return val
+
+            make = _get("0th", piexif.ImageIFD.Make)
+            model = _get("0th", piexif.ImageIFD.Model)
+            software = _get("0th", piexif.ImageIFD.Software)
+            orientation = _get("0th", piexif.ImageIFD.Orientation)
+            date_orig = _get("Exif", piexif.ExifIFD.DateTimeOriginal)
+            date_digit = _get("Exif", piexif.ExifIFD.DateTimeDigitized)
+            iso_val = _get("Exif", piexif.ExifIFD.ISOSpeedRatings)
+            lens = _get("Exif", piexif.ExifIFD.LensModel)
+
+            # Aperture (FNumber as rational)
+            fnumber = exif_dict.get("Exif", {}).get(piexif.ExifIFD.FNumber)
+            aperture_str = None
+            if fnumber and isinstance(fnumber, tuple) and len(fnumber) == 2 and fnumber[1] != 0:
+                aperture_str = f"f/{fnumber[0] / fnumber[1]:.1f}"
+
+            # Shutter speed (ExposureTime as rational)
+            exposure = exif_dict.get("Exif", {}).get(piexif.ExifIFD.ExposureTime)
+            shutter_str = None
+            if exposure and isinstance(exposure, tuple) and len(exposure) == 2 and exposure[1] != 0:
+                if exposure[0] < exposure[1]:
+                    shutter_str = f"1/{exposure[1] // exposure[0]}s"
+                else:
+                    shutter_str = f"{exposure[0] / exposure[1]:.1f}s"
+
+            # Focal length
+            fl = exif_dict.get("Exif", {}).get(piexif.ExifIFD.FocalLength)
+            fl_str = None
+            if fl and isinstance(fl, tuple) and len(fl) == 2 and fl[1] != 0:
+                fl_str = f"{fl[0] / fl[1]:.0f}mm"
+
+            has_meaningful_exif = any([make, model, date_orig, iso_val])
+
+            if has_meaningful_exif:
+                metadata["hasMissingEXIF"] = False
+
+            if make:
+                metadata["cameraMake"] = make
+            if model:
+                metadata["cameraModel"] = model
+            if software:
+                metadata["software"] = str(software)
+            if orientation:
+                metadata["orientation"] = orientation
+            if date_orig:
+                metadata["creationDate"] = str(date_orig)
+            elif date_digit:
+                metadata["creationDate"] = str(date_digit)
+            if iso_val:
+                metadata["iso"] = iso_val if isinstance(iso_val, int) else str(iso_val)
+            if lens:
+                metadata["lensModel"] = str(lens)
+            if aperture_str:
+                metadata["aperture"] = aperture_str
+            if shutter_str:
+                metadata["shutterSpeed"] = shutter_str
+            if fl_str:
+                metadata["focalLength"] = fl_str
+
+            # GPS
+            gps_data = exif_dict.get("GPS", {})
+            if gps_data:
+                lat_ref = gps_data.get(piexif.GPSIFD.GPSLatitudeRef)
+                lat = gps_data.get(piexif.GPSIFD.GPSLatitude)
+                lon_ref = gps_data.get(piexif.GPSIFD.GPSLongitudeRef)
+                lon = gps_data.get(piexif.GPSIFD.GPSLongitude)
+                if lat and lon:
+                    def _to_deg(vals):
+                        d, m, s = vals
+                        return d[0]/d[1] + m[0]/m[1]/60 + s[0]/s[1]/3600
+                    try:
+                        lat_val = _to_deg(lat)
+                        lon_val = _to_deg(lon)
+                        if lat_ref == b"S":
+                            lat_val = -lat_val
+                        if lon_ref == b"W":
+                            lon_val = -lon_val
+                        metadata["gpsLatitude"] = round(lat_val, 6)
+                        metadata["gpsLongitude"] = round(lon_val, 6)
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logger.debug("EXIF extraction failed: %s", e)
+    else:
+        # Fallback: check raw bytes for Exif marker
+        if b"Exif" in image_bytes[:100]:
+            metadata["hasMissingEXIF"] = False
+
+    return metadata
+
+
+# ── 2. Metadata Scoring ─────────────────────────────────────────────────────
+
+def score_metadata(metadata: dict) -> dict:
+    """Score metadata for authenticity. Returns score 0-100 and indicators."""
+    score = 0
+    indicators = []
+
+    if metadata.get("hasMissingEXIF"):
+        score += 30
+        indicators.append({
+            "signal": "Missing EXIF metadata",
+            "detail": "AI-generated images typically lack camera EXIF data",
+            "severity": "high",
+            "type": "red"
+        })
+    else:
+        score -= 10
+        indicators.append({
+            "signal": "EXIF metadata present",
+            "detail": "Contains camera information — suggests real photograph",
+            "severity": "low",
+            "type": "green"
+        })
+
+    if metadata.get("cameraMake") and metadata.get("cameraModel"):
+        score -= 15
+        indicators.append({
+            "signal": f"Camera: {metadata['cameraMake']} {metadata['cameraModel']}",
+            "detail": "Identified camera hardware — strong authenticity signal",
+            "severity": "low",
+            "type": "green"
+        })
+
+    software = metadata.get("software")
+    if software:
+        ai_software = ["stable diffusion", "midjourney", "dall-e", "comfyui", "automatic1111", "novelai", "invoke"]
+        if any(s in software.lower() for s in ai_software):
+            score += 35
+            indicators.append({
+                "signal": f"AI software detected: {software}",
+                "detail": "Image was processed by known AI generation software",
+                "severity": "high",
+                "type": "red"
+            })
+        else:
+            indicators.append({
+                "signal": f"Software: {software}",
+                "detail": "Image editing software detected",
+                "severity": "low",
+                "type": "yellow"
+            })
+
+    if metadata.get("creationDate"):
+        indicators.append({
+            "signal": f"Created: {metadata['creationDate']}",
+            "detail": "Original creation date found",
+            "severity": "low",
+            "type": "green"
+        })
+    else:
+        score += 10
+        indicators.append({
+            "signal": "No creation date",
+            "detail": "Missing timestamp — common in AI-generated images",
+            "severity": "medium",
+            "type": "yellow"
+        })
+
+    if metadata.get("gpsLatitude"):
+        score -= 10
+        indicators.append({
+            "signal": "GPS coordinates found",
+            "detail": "Contains location data — strong authenticity signal (⚠️ privacy risk)",
+            "severity": "low",
+            "type": "green"
+        })
+
+    # Dimensions check
+    w = metadata.get("width")
+    h = metadata.get("height")
+    if w and h:
+        ai_dims = [(512,512),(768,768),(1024,1024),(1024,768),(768,1024),(2048,2048),(1536,1536),(896,1152),(1152,896)]
+        if (w, h) in ai_dims:
+            score += 15
+            indicators.append({
+                "signal": f"AI-typical dimensions: {w}×{h}",
+                "detail": "These dimensions match common AI generator output sizes",
+                "severity": "medium",
+                "type": "yellow"
+            })
+        if w % 64 == 0 and h % 64 == 0:
+            score += 5
+            indicators.append({
+                "signal": "Dimensions are multiples of 64",
+                "detail": "AI models often output at 64-pixel aligned dimensions",
+                "severity": "low",
+                "type": "yellow"
+            })
+
+    return {"score": max(0, min(100, score)), "indicators": indicators}
+
+
+# ── 3. Pixel Pattern Analysis ────────────────────────────────────────────────
+
+def analyze_pixel_patterns(image_bytes: bytes) -> dict:
+    """Analyze pixel-level patterns for AI generation signatures."""
+    result = {
+        "noiseDistribution": "unknown",
+        "noiseScore": 0,
+        "colorGradients": "unknown",
+        "gradientScore": 0,
+        "compressionArtifacts": False,
+        "compressionScore": 0,
+        "patternConsistency": "unknown",
+        "patternScore": 0,
+        "overallScore": 0,
+        "indicators": [],
+    }
+
+    if not Image or not np:
+        return result
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        # Resize for faster analysis
+        max_dim = 256
+        if img.width > max_dim or img.height > max_dim:
+            ratio = min(max_dim / img.width, max_dim / img.height)
+            img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.LANCZOS)
+
+        arr = np.array(img, dtype=np.float32)
+
+        # ── Noise analysis ──
+        # Compute local noise via Laplacian-like filter
+        gray = np.mean(arr, axis=2)
+        if gray.shape[0] > 2 and gray.shape[1] > 2:
+            laplacian = np.abs(
+                gray[1:-1, 1:-1] * 4
+                - gray[:-2, 1:-1] - gray[2:, 1:-1]
+                - gray[1:-1, :-2] - gray[1:-1, 2:]
+            )
+            noise_mean = float(np.mean(laplacian))
+            noise_std = float(np.std(laplacian))
+
+            if noise_std < 3.0 and noise_mean < 5.0:
+                result["noiseDistribution"] = "suspicious"
+                result["noiseScore"] = 75
+                result["indicators"].append({
+                    "signal": "Unnaturally uniform noise distribution",
+                    "detail": f"Noise σ={noise_std:.1f}, μ={noise_mean:.1f} — hallmark of AI generation",
+                    "severity": "high",
+                    "type": "red"
+                })
+            elif noise_std < 8.0:
+                result["noiseDistribution"] = "suspicious"
+                result["noiseScore"] = 45
+                result["indicators"].append({
+                    "signal": "Low noise variance",
+                    "detail": f"Noise σ={noise_std:.1f} — smoother than typical photographs",
+                    "severity": "medium",
+                    "type": "yellow"
+                })
+            else:
+                result["noiseDistribution"] = "normal"
+                result["noiseScore"] = 15
+                result["indicators"].append({
+                    "signal": "Natural noise patterns",
+                    "detail": "Noise distribution consistent with real camera sensors",
+                    "severity": "low",
+                    "type": "green"
+                })
+
+        # ── Color gradient analysis ──
+        dx = np.diff(arr, axis=1)
+        dy = np.diff(arr, axis=0)
+        grad_mag = np.sqrt(np.mean(dx[:, :, :] ** 2) + np.mean(dy[:, :, :] ** 2))
+        grad_std = float(np.std(np.sqrt(np.sum(dx ** 2, axis=2))))
+
+        if grad_std < 8.0:
+            result["colorGradients"] = "unusual"
+            result["gradientScore"] = 70
+            result["indicators"].append({
+                "signal": "Unusually smooth color gradients",
+                "detail": "Gradient uniformity suggests AI diffusion model output",
+                "severity": "high",
+                "type": "red"
+            })
+        elif grad_std < 15.0:
+            result["colorGradients"] = "suspicious"
+            result["gradientScore"] = 40
+        else:
+            result["colorGradients"] = "normal"
+            result["gradientScore"] = 10
+            result["indicators"].append({
+                "signal": "Natural color gradients",
+                "detail": "Color transitions look natural",
+                "severity": "low",
+                "type": "green"
+            })
+
+        # ── Compression artifacts ──
+        # Check for 8x8 block artifacts (JPEG)
+        if gray.shape[0] >= 16 and gray.shape[1] >= 16:
+            block_size = 8
+            h_blocks = gray.shape[0] // block_size
+            w_blocks = gray.shape[1] // block_size
+            block_vars = []
+            for bi in range(min(h_blocks, 8)):
+                for bj in range(min(w_blocks, 8)):
+                    block = gray[bi*block_size:(bi+1)*block_size, bj*block_size:(bj+1)*block_size]
+                    block_vars.append(float(np.var(block)))
+
+            if block_vars:
+                var_of_vars = float(np.var(block_vars))
+                if var_of_vars < 20:
+                    result["compressionArtifacts"] = True
+                    result["compressionScore"] = 60
+                    result["indicators"].append({
+                        "signal": "Compression artifacts detected",
+                        "detail": "Block-level uniformity suggests AI-generated compression patterns",
+                        "severity": "medium",
+                        "type": "yellow"
+                    })
+
+        # ── Pattern consistency (region uniformity) ──
+        h, w = arr.shape[:2]
+        if h >= 64 and w >= 64:
+            regions = [
+                arr[:h//2, :w//2],
+                arr[:h//2, w//2:],
+                arr[h//2:, :w//2],
+                arr[h//2:, w//2:],
+            ]
+            region_stds = [float(np.std(r)) for r in regions]
+            std_of_stds = float(np.std(region_stds))
+            if std_of_stds < 5.0:
+                result["patternConsistency"] = "repetitive"
+                result["patternScore"] = 65
+                result["indicators"].append({
+                    "signal": "Repetitive texture patterns",
+                    "detail": "All image regions have similar texture complexity — AI signature",
+                    "severity": "medium",
+                    "type": "yellow"
+                })
+            else:
+                result["patternConsistency"] = "consistent"
+                result["patternScore"] = 15
+
+        # ── Color channel correlation ──
+        r, g, b = arr[:,:,0].flatten(), arr[:,:,1].flatten(), arr[:,:,2].flatten()
+        if len(r) > 100:
+            corr_rg = float(np.corrcoef(r, g)[0, 1])
+            corr_rb = float(np.corrcoef(r, b)[0, 1])
+            avg_corr = (abs(corr_rg) + abs(corr_rb)) / 2
+            if avg_corr > 0.92:
+                result["indicators"].append({
+                    "signal": "Extremely high color channel correlation",
+                    "detail": f"R-G: {corr_rg:.3f}, R-B: {corr_rb:.3f} — typical of AI imagery",
+                    "severity": "high",
+                    "type": "red"
+                })
+
+        # Overall pixel score
+        result["overallScore"] = max(0, min(100, int(
+            result["noiseScore"] * 0.3 +
+            result["gradientScore"] * 0.25 +
+            result["compressionScore"] * 0.2 +
+            result["patternScore"] * 0.25
+        )))
+
+    except Exception as e:
+        logger.error("Pixel analysis error: %s", e)
+        result["indicators"].append({
+            "signal": "Pixel analysis incomplete",
+            "detail": str(e),
+            "severity": "low",
+            "type": "yellow"
+        })
+
+    return result
+
+
+# ── 4. HuggingFace API Call ──────────────────────────────────────────────────
+
+HUGGINGFACE_MODELS = [
+    "umm-maybe/AI-image-detector",
+    "Organika/sdxl-detector",
+]
+
+def call_huggingface_api(image_bytes: bytes) -> dict:
+    """Call HuggingFace Inference API for AI image detection.
+    Returns: {"aiGenerationScore": 0-100, "model": str, "raw": dict, "available": bool}
+    """
+    api_key = os.getenv("HUGGINGFACE_API_KEY")
+    if not api_key:
+        logger.info("HUGGINGFACE_API_KEY not set — skipping HuggingFace analysis")
+        return {"aiGenerationScore": 0, "model": "none", "raw": {}, "available": False}
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    for model_id in HUGGINGFACE_MODELS:
+        try:
+            url = f"https://api-inference.huggingface.co/models/{model_id}"
+            response = http_requests.post(url, headers=headers, data=image_bytes, timeout=15)
+
+            if response.status_code == 503:
+                # Model loading
+                logger.info("HuggingFace model %s is loading, trying next...", model_id)
+                continue
+
+            if response.status_code != 200:
+                logger.warning("HuggingFace %s returned %d", model_id, response.status_code)
+                continue
+
+            data = response.json()
+
+            # Parse classification results
+            ai_score = 0
+            if isinstance(data, list) and len(data) > 0:
+                # Format: [{"label": "artificial", "score": 0.95}, {"label": "human", "score": 0.05}]
+                if isinstance(data[0], list):
+                    data = data[0]
+                for item in data:
+                    label = item.get("label", "").lower()
+                    score = item.get("score", 0)
+                    if any(k in label for k in ["artificial", "ai", "fake", "generated", "ai_generated"]):
+                        ai_score = int(score * 100)
+                    elif any(k in label for k in ["human", "real", "authentic", "not_ai"]):
+                        ai_score = int((1 - score) * 100)
+
+            return {
+                "aiGenerationScore": ai_score,
+                "model": model_id,
+                "raw": data if isinstance(data, (list, dict)) else {},
+                "available": True,
+            }
+
+        except Exception as e:
+            logger.warning("HuggingFace API error for %s: %s", model_id, e)
+            continue
+
+    return {"aiGenerationScore": 0, "model": "none", "raw": {}, "available": False}
+
+
+# ── 5. Flag Generation ───────────────────────────────────────────────────────
+
+def generate_flags(metadata: dict, pixel_analysis: dict, hf_result: dict) -> list:
+    """Generate list of red flags found."""
+    flags = []
+
+    if metadata.get("hasMissingEXIF"):
+        flags.append({"flag": "missing_exif", "label": "Missing EXIF Data", "severity": "high",
+                       "detail": "AI-generated images lack camera metadata"})
+
+    if pixel_analysis.get("noiseDistribution") == "suspicious":
+        flags.append({"flag": "noise_anomaly", "label": "Noise Pattern Anomaly", "severity": "high",
+                       "detail": "Unnaturally uniform noise detected"})
+
+    if pixel_analysis.get("colorGradients") in ["unusual", "suspicious"]:
+        flags.append({"flag": "gradient_anomaly", "label": "Color Gradient Anomaly", "severity": "medium",
+                       "detail": "Smooth gradients typical of diffusion models"})
+
+    if pixel_analysis.get("compressionArtifacts"):
+        flags.append({"flag": "compression_artifacts", "label": "Compression Artifacts", "severity": "medium",
+                       "detail": "Block-level compression patterns detected"})
+
+    if pixel_analysis.get("patternConsistency") == "repetitive":
+        flags.append({"flag": "repetitive_pattern", "label": "Repetitive Patterns", "severity": "medium",
+                       "detail": "Texture uniformity across regions"})
+
+    if hf_result.get("aiGenerationScore", 0) > 60:
+        flags.append({"flag": "ai_model_detection", "label": "AI Model Detection", "severity": "high",
+                       "detail": f"AI classifier confidence: {hf_result['aiGenerationScore']}%"})
+
+    w = metadata.get("width")
+    h = metadata.get("height")
+    if w and h:
+        ai_dims = [(512,512),(768,768),(1024,1024),(2048,2048),(1536,1536)]
+        if (w, h) in ai_dims:
+            flags.append({"flag": "ai_dimensions", "label": "AI-Typical Dimensions", "severity": "medium",
+                           "detail": f"{w}×{h} matches known AI output sizes"})
+
+    return flags
+
+
+# ── 6. Recommendation ────────────────────────────────────────────────────────
+
+def get_recommendation(risk_score: int) -> dict:
+    """Return recommendation based on final risk score."""
+    if risk_score <= 30:
+        return {
+            "level": "low",
+            "title": "Likely Authentic",
+            "message": "This image appears to be an authentic photograph. Camera metadata and pixel patterns are consistent with real-world captures.",
+            "icon": "✅",
+            "color": "green",
+        }
+    elif risk_score <= 60:
+        return {
+            "level": "medium",
+            "title": "Inconclusive",
+            "message": "This image has mixed indicators. Some patterns suggest potential AI generation, but results are not definitive. Consider reverse image search for verification.",
+            "icon": "⚠️",
+            "color": "yellow",
+        }
+    else:
+        return {
+            "level": "high",
+            "title": "Likely AI-Generated",
+            "message": "Multiple AI generation indicators detected. Missing metadata, unusual pixel patterns, and/or AI classifier results suggest this image was likely created by an AI model.",
+            "icon": "🔴",
+            "color": "red",
+        }
+
+
+# ── 7. Full Analysis Pipeline ────────────────────────────────────────────────
+
+def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str = "") -> dict:
+    """Run complete image analysis pipeline."""
+
+    # Step 1: Metadata
+    metadata = extract_exif_metadata(image_bytes, filename)
+
+    # Step 2: Score metadata
+    meta_result = score_metadata(metadata)
+    metadata_score = meta_result["score"]
+
+    # Step 3: Pixel analysis
+    pixel_analysis = analyze_pixel_patterns(image_bytes)
+    pixel_score = pixel_analysis["overallScore"]
+
+    # Step 4: HuggingFace
+    hf_result = call_huggingface_api(image_bytes)
+    hf_score = hf_result.get("aiGenerationScore", 0)
+
+    # Step 5: Combined score
+    if hf_result.get("available"):
+        # With HuggingFace: metadata 25%, pixel 35%, HuggingFace 40%
+        final_score = int(metadata_score * 0.25 + pixel_score * 0.35 + hf_score * 0.40)
+    else:
+        # Without HuggingFace: metadata 35%, pixel 65%
+        final_score = int(metadata_score * 0.35 + pixel_score * 0.65)
+
+    final_score = max(0, min(100, final_score))
+
+    # Step 6: Classification
+    if final_score <= 30:
+        classification = "Likely Authentic"
+    elif final_score <= 60:
+        classification = "Inconclusive"
+    else:
+        classification = "Likely AI-Generated"
+
+    # Step 7: Flags
+    flags = generate_flags(metadata, pixel_analysis, hf_result)
+
+    # Step 8: Recommendation
+    recommendation = get_recommendation(final_score)
+
+    # Step 9: Confidence
+    indicator_count = len(meta_result["indicators"]) + len(pixel_analysis.get("indicators", [])) + len(flags)
+    confidence = min(95, 50 + indicator_count * 5)
+    if hf_result.get("available"):
+        confidence = min(98, confidence + 15)
+
+    # Combine all indicators
+    all_indicators = meta_result["indicators"] + pixel_analysis.get("indicators", [])
+
+    # Tips
+    tips = []
+    if final_score > 30:
+        tips.append("Use Google Reverse Image Search to verify the origin.")
+        tips.append("Zoom in on details: fingers, text, earrings, and teeth.")
+        tips.append("Check for inconsistent lighting and shadow directions.")
+        tips.append("Look for watermarks or creator attribution.")
+    tips.append("AI detection is probabilistic — no tool is 100% accurate.")
+
+    return {
+        "riskScore": final_score,
+        "classification": classification,
+        "metadata": metadata,
+        "metadataScore": metadata_score,
+        "metadataIndicators": meta_result["indicators"],
+        "pixelAnalysis": {
+            "noiseDistribution": pixel_analysis["noiseDistribution"],
+            "noiseScore": pixel_analysis["noiseScore"],
+            "colorGradients": pixel_analysis["colorGradients"],
+            "gradientScore": pixel_analysis["gradientScore"],
+            "compressionArtifacts": pixel_analysis["compressionArtifacts"],
+            "compressionScore": pixel_analysis["compressionScore"],
+            "patternConsistency": pixel_analysis["patternConsistency"],
+            "patternScore": pixel_analysis["patternScore"],
+            "overallScore": pixel_analysis["overallScore"],
+            "indicators": pixel_analysis.get("indicators", []),
+        },
+        "aiDetection": {
+            "score": hf_score,
+            "model": hf_result.get("model", "none"),
+            "available": hf_result.get("available", False),
+            "raw": hf_result.get("raw", {}),
+        },
+        "flags": flags,
+        "recommendation": recommendation,
+        "confidence": confidence,
+        "allIndicators": all_indicators,
+        "tips": tips,
+        "scoreBreakdown": {
+            "metadata": metadata_score,
+            "pixelAnalysis": pixel_score,
+            "aiModel": hf_score if hf_result.get("available") else None,
+            "weights": {
+                "metadata": 0.25 if hf_result.get("available") else 0.35,
+                "pixelAnalysis": 0.35 if hf_result.get("available") else 0.65,
+                "aiModel": 0.40 if hf_result.get("available") else 0,
+            }
+        },
+    }
