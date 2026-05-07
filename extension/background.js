@@ -1,8 +1,11 @@
-// TruthShield Background Service Worker (Manifest V3) — Enhanced v3.0
+// TruthShield Background Service Worker (Manifest V3) — Enhanced v4.0
 // Supports: Text analysis, Image analysis, URL safety check, Auto Domain Warning
+// Uses SHARED CLOUD BACKEND for global community protection
 
-const API_URL = "https://truth-guard-1.onrender.com";
-const CACHE_TTL = 5 * 60 * 1000; // 5-minute cache for domain checks
+importScripts('config.js');
+
+const API_URL = TRUTHSHIELD_CONFIG.API_BASE;
+const CACHE_TTL = TRUTHSHIELD_CONFIG.CACHE_TTL;
 
 // ── Context Menus ──
 chrome.runtime.onInstalled.addListener(() => {

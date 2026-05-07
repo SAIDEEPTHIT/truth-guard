@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TruthShield",
-  "version": "3.0.0",
-  "description": "Explainable AI browser extension to detect AI-generated content, scam messages, fraudulent links, and manipulated images — with India-specific intelligence.",
+  "version": "4.0.0",
+  "description": "Explainable AI browser extension to detect AI-generated content, scam messages, fraudulent links, and manipulated images — with India-specific intelligence and community-driven protection.",
   "permissions": ["contextMenus", "activeTab", "storage", "tabs"],
   "background": {
     "service_worker": "background.js"
@@ -10,7 +10,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["config.js", "content.js"],
       "css": []
     }
   ],
