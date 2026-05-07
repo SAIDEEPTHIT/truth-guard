@@ -13,5 +13,5 @@ const TRUTHSHIELD_CONFIG = {
   CACHE_TTL: 5 * 60 * 1000,
 
   // Extension version
-  VERSION: "4.0.0",
+  VERSION: "5.0.0",
 };
