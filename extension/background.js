@@ -80,7 +80,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
     const badgeColor =
       result.classification === "Likely Authentic" ? "#22c55e" :
-      result.classification === "Possibly AI-Generated" ? "#eab308" : "#ef4444";
+      result.classification === "Likely AI-Generated" ? "#ef4444" : "#eab308";
     chrome.action.setBadgeText({ text: String(result.risk_score) });
     chrome.action.setBadgeBackgroundColor({ color: badgeColor });
 
