@@ -1,4 +1,4 @@
-"""TruthShield – FastAPI Backend v5.0 (OpenAI-Powered + Community Blocklist)
+"""TruthShield – FastAPI Backend v6.0 (OpenAI-Powered + Enhanced Image AI + Community Blocklist)
 
 Run:  uvicorn main:app --reload --port 8000
 """
@@ -9,6 +9,15 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from analyzer import analyze_text, analyze_image
+from image_analyzer import (
+    extract_exif_metadata,
+    score_metadata,
+    analyze_pixel_patterns,
+    call_huggingface_api,
+    generate_flags,
+    get_recommendation,
+    analyze_image_full,
+)
 from blocklist import (
     add_domain,
     get_blocklist,
