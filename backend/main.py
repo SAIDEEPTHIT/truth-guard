@@ -101,7 +101,7 @@ class AddDomainRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "TruthShield API", "version": "5.0.0"}
+    return {"status": "ok", "service": "TruthShield API", "version": "6.0.0"}
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
