@@ -31,8 +31,8 @@ from blocklist import (
 
 app = FastAPI(
     title="TruthShield API",
-    version="5.0.0",
-    description="OpenAI-powered API for detecting scams, AI-generated content, and manipulation with India-specific intelligence. Includes community domain blocklist.",
+    version="6.0.0",
+    description="OpenAI-powered API for detecting scams, AI-generated content, and manipulation with India-specific intelligence. Enhanced AI image detection with HuggingFace + pixel analysis. Community domain blocklist.",
 )
 
 app.add_middleware(
