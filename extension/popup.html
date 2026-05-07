@@ -419,7 +419,7 @@
   <div class="header">
     <div class="header-left">
       <div class="shield-icon">🛡️</div>
-      <h1>TruthShield <span class="version-badge">v3.0</span></h1>
+      <h1>TruthShield <span class="version-badge">v4.0</span></h1>
     </div>
     <div class="toggle-row">
       <label>👴 Senior</label>
@@ -498,14 +498,39 @@
 
   <button id="clear-btn" class="btn-clear" style="display:none;">Clear Results</button>
 
+  <!-- Community Warning Card (shown when domain is already reported) -->
+  <div id="community-warning" class="community-warning">
+    <div class="cw-header">
+      <div class="cw-icon">⚠️</div>
+      <div>
+        <div class="cw-title">Community Warning</div>
+        <div class="cw-subtitle">This domain has been reported by TruthShield users</div>
+      </div>
+    </div>
+    <div class="cw-domain" id="cw-domain"></div>
+    <div class="cw-stats">
+      <div class="cw-stat">🚨 Threat: <strong id="cw-threat-type">—</strong></div>
+      <div class="cw-stat">👥 Reports: <strong id="cw-report-count">0</strong></div>
+      <div class="cw-stat">👍 <strong id="cw-upvotes">0</strong> 👎 <strong id="cw-downvotes">0</strong></div>
+    </div>
+    <div class="cw-risk" id="cw-recommendation">
+      🛡️ <strong>Recommendation:</strong> Avoid entering passwords, OTPs, banking details, or making payments on this site.
+    </div>
+    <div class="cw-buttons">
+      <button class="cw-btn-leave" id="cw-leave-btn">🚪 Leave This Site</button>
+      <button class="cw-btn-continue" id="cw-continue-btn">Continue Anyway →</button>
+    </div>
+  </div>
+
   <!-- Domain Report Section -->
   <div id="domain-section" class="domain-card">
     <div class="domain-label">🌐 Current Website</div>
     <div class="domain-name" id="current-domain">Detecting...</div>
     <div id="domain-status"></div>
     <button id="report-btn" class="btn-report" style="display:none;">🚨 Report Current Site</button>
+    <div id="already-reported" class="already-reported-badge">✅ Already Reported by Community</div>
     <div id="report-success" class="report-success">
-      ✅ Domain reported successfully! Other TruthShield users will now be protected.
+      ✅ Domain reported successfully! All TruthShield users worldwide will now be protected.
     </div>
   </div>
 
@@ -531,6 +556,7 @@
     </div>
   </div>
 
+  <script src="config.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
