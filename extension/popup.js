@@ -59,20 +59,48 @@ document.addEventListener("DOMContentLoaded", () => {
     const domainEl = document.getElementById("current-domain");
     const reportBtn = document.getElementById("report-btn");
     const domainStatus = document.getElementById("domain-status");
+    const communityWarning = document.getElementById("community-warning");
+    const alreadyReported = document.getElementById("already-reported");
 
     if (response && response.hostname) {
       currentHostname = response.hostname;
       domainEl.textContent = currentHostname;
 
-      // Check if already blocked
+      // Check community blocklist via SHARED CLOUD BACKEND
       fetch(`${getApiUrl()}/api/blocklist/check?domain=${encodeURIComponent(currentHostname)}`)
         .then(r => r.json())
         .then(data => {
           if (data.blocked) {
+            // Show prominent community warning card
+            communityWarning.style.display = "block";
+            document.getElementById("cw-domain").textContent = currentHostname;
+            document.getElementById("cw-threat-type").textContent = data.threat_type || "Unknown";
+            document.getElementById("cw-report-count").textContent = data.report_count || 1;
+            document.getElementById("cw-upvotes").textContent = data.upvotes || 0;
+            document.getElementById("cw-downvotes").textContent = data.downvotes || 0;
+
+            // Risk level text
+            const riskLevel = (data.report_count || 1) >= 5 ? "CRITICAL" : (data.report_count || 1) >= 3 ? "HIGH" : "MODERATE";
+            document.getElementById("cw-recommendation").innerHTML = `
+              🛡️ <strong>Risk Level: ${riskLevel}</strong> — Avoid entering passwords, OTPs, banking details, or making payments on this site.
+              This domain has been flagged by <strong>${data.report_count || 1}</strong> TruthShield user(s) globally.
+            `;
+
+            // Wire up leave/continue buttons
+            document.getElementById("cw-leave-btn").addEventListener("click", () => {
+              chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                if (tabs[0]) chrome.tabs.update(tabs[0].id, { url: "about:blank" });
+              });
+            });
+            document.getElementById("cw-continue-btn").addEventListener("click", () => {
+              communityWarning.style.display = "none";
+            });
+
+            // Domain section: show "Already Reported" instead of report button
             domainEl.classList.add("blocked");
             domainStatus.innerHTML = `<span class="domain-blocked-badge">⚠️ Reported ${data.report_count}x — ${data.threat_type}</span>`;
-            reportBtn.style.display = "block";
-            reportBtn.textContent = "🚨 Report Again";
+            alreadyReported.style.display = "block";
+            reportBtn.style.display = "none";
           } else {
             reportBtn.style.display = "block";
           }
