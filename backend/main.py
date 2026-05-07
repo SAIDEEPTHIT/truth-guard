@@ -1,19 +1,29 @@
-"""TruthShield – FastAPI Backend v4.0 (OpenAI-Powered)
+"""TruthShield – FastAPI Backend v5.0 (OpenAI-Powered + Community Blocklist)
 
 Run:  uvicorn main:app --reload --port 8000
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
 
 from analyzer import analyze_text, analyze_image
+from blocklist import (
+    add_domain,
+    get_blocklist,
+    get_domain_details,
+    upvote_domain,
+    downvote_domain,
+    get_stats,
+    seed_demo_data,
+    THREAT_TYPES,
+)
 
 app = FastAPI(
     title="TruthShield API",
-    version="4.0.0",
-    description="OpenAI-powered API for detecting scams, AI-generated content, and manipulation with India-specific intelligence.",
+    version="5.0.0",
+    description="OpenAI-powered API for detecting scams, AI-generated content, and manipulation with India-specific intelligence. Includes community domain blocklist.",
 )
 
 app.add_middleware(
@@ -71,11 +81,18 @@ class ImageAnalyzeResponse(BaseModel):
     tips: list[str]
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────────
+class AddDomainRequest(BaseModel):
+    domain: str = Field(..., min_length=1, max_length=255)
+    threat_type: str = Field(default="Other")
+    description: str = Field(default="", max_length=500)
+    proof_link: str = Field(default="", max_length=500)
+
+
+# ── Analysis Endpoints ─────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "TruthShield API", "version": "4.0.0"}
+    return {"status": "ok", "service": "TruthShield API", "version": "5.0.0"}
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -123,6 +140,69 @@ async def analyze_image_endpoint(file: UploadFile = File(...)):
     )
 
 
+# ── Blocklist Endpoints ───────────────────────────────────────────────────────
+
+@app.get("/api/blocklist/stats")
+def blocklist_stats():
+    """Return overall blocklist statistics."""
+    return get_stats()
+
+
+@app.post("/api/blocklist/add")
+def blocklist_add(req: AddDomainRequest):
+    """Report a domain to the community blocklist."""
+    result = add_domain(req.domain, req.threat_type, req.description, req.proof_link)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@app.get("/api/blocklist")
+def blocklist_list(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    threat_type: Optional[str] = Query(default=None),
+    sort: str = Query(default="recently_added"),
+    search: Optional[str] = Query(default=None),
+):
+    """Get paginated blocklist with filtering and sorting."""
+    return get_blocklist(limit, offset, threat_type, sort, search)
+
+
+@app.get("/api/blocklist/{domain:path}")
+def blocklist_domain_details(domain: str):
+    """Get detailed info for a specific domain."""
+    result = get_domain_details(domain)
+    if not result:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    return result
+
+
+@app.post("/api/blocklist/{domain:path}/upvote")
+def blocklist_upvote(domain: str):
+    """Upvote a blocked domain."""
+    result = upvote_domain(domain)
+    if not result["success"]:
+        raise HTTPException(status_code=404, detail=result["message"])
+    return result
+
+
+@app.post("/api/blocklist/{domain:path}/downvote")
+def blocklist_downvote(domain: str):
+    """Downvote a blocked domain."""
+    result = downvote_domain(domain)
+    if not result["success"]:
+        raise HTTPException(status_code=404, detail=result["message"])
+    return result
+
+
+@app.post("/api/blocklist/seed")
+def blocklist_seed():
+    """Seed demo data for presentation."""
+    seed_demo_data()
+    return {"success": True, "message": "Demo data seeded"}
+
+
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "4.0.0"}
+    return {"status": "healthy", "version": "5.0.0"}
