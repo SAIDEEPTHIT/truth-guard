@@ -1,7 +1,8 @@
-// TruthShield Background Service Worker (Manifest V3) — Enhanced v2.1
-// Supports: Text analysis, Image analysis, URL safety check
+// TruthShield Background Service Worker (Manifest V3) — Enhanced v3.0
+// Supports: Text analysis, Image analysis, URL safety check, Auto Domain Warning
 
 const API_URL = "https://truth-guard-1.onrender.com";
+const CACHE_TTL = 5 * 60 * 1000; // 5-minute cache for domain checks
 
 // ── Context Menus ──
 chrome.runtime.onInstalled.addListener(() => {
@@ -723,3 +724,116 @@ function detectLanguage(text) {
   }
   return "English";
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COMMUNITY AUTO-WARN SYSTEM
+// ══════════════════════════════════════════════════════════════════════════════
+
+function extractHostname(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+async function checkDomainBlocklist(domain) {
+  // Check cache first
+  const cacheKey = `ts_cache_${domain}`;
+  const cached = await chrome.storage.local.get([cacheKey]);
+  if (cached[cacheKey] && (Date.now() - cached[cacheKey].ts < CACHE_TTL)) {
+    return cached[cacheKey].data;
+  }
+
+  try {
+    const res = await fetch(`${API_URL}/api/blocklist/check?domain=${encodeURIComponent(domain)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    // Cache result
+    await chrome.storage.local.set({ [cacheKey]: { data, ts: Date.now() } });
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function handleTabCheck(tabId, url) {
+  if (!url || url.startsWith("chrome://") || url.startsWith("chrome-extension://") || url.startsWith("about:")) return;
+
+  const domain = extractHostname(url);
+  if (!domain) return;
+
+  const result = await checkDomainBlocklist(domain);
+  if (result && result.blocked) {
+    // Send warning to content script
+    try {
+      await chrome.tabs.sendMessage(tabId, {
+        type: "truthshield_domain_warning",
+        data: result,
+      });
+    } catch {
+      // Content script might not be ready yet, retry once after delay
+      setTimeout(async () => {
+        try {
+          await chrome.tabs.sendMessage(tabId, {
+            type: "truthshield_domain_warning",
+            data: result,
+          });
+        } catch { /* tab closed or no content script */ }
+      }, 1500);
+    }
+
+    // Set badge
+    chrome.action.setBadgeText({ text: "⚠", tabId });
+    chrome.action.setBadgeBackgroundColor({ color: "#ef4444", tabId });
+  }
+}
+
+// Auto-check on tab navigation
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" && tab.url) {
+    handleTabCheck(tabId, tab.url);
+  }
+});
+
+// Auto-check on tab activation
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    if (tab.url) handleTabCheck(tab.id, tab.url);
+  } catch { /* tab may not exist */ }
+});
+
+// Listen for report requests from popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "truthshield_report_domain") {
+    const { domain, threat_type, description } = message;
+    fetch(`${API_URL}/api/blocklist/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain, threat_type, description }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        // Clear cache for this domain so next check picks it up
+        chrome.storage.local.remove([`ts_cache_${domain}`]);
+        sendResponse({ success: true, data });
+      })
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true; // keep channel open for async response
+  }
+
+  if (message.type === "truthshield_get_current_tab") {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        const hostname = extractHostname(tabs[0].url || "");
+        sendResponse({ url: tabs[0].url, hostname });
+      } else {
+        sendResponse({ url: null, hostname: null });
+      }
+    });
+    return true;
+  }
+});
