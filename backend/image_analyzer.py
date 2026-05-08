@@ -6,7 +6,9 @@ Graceful fallback if HuggingFace API is unavailable.
 
 import io
 import os
+import json
 import math
+import base64
 import struct
 import logging
 from typing import Optional
@@ -26,6 +28,156 @@ except ImportError:
 import requests as http_requests
 
 logger = logging.getLogger(__name__)
+
+
+# ── Lazy Vision LLM clients ──────────────────────────────────────────────────
+
+_openai_vision_client = None
+_claude_vision_client = None
+
+
+def _get_openai_vision():
+    global _openai_vision_client
+    if _openai_vision_client is not None:
+        return _openai_vision_client
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI
+        _openai_vision_client = OpenAI(api_key=api_key, timeout=20.0)
+        return _openai_vision_client
+    except Exception as exc:
+        logger.warning("OpenAI Vision init failed: %s", exc)
+        return None
+
+
+def _get_claude_vision():
+    global _claude_vision_client
+    if _claude_vision_client is not None:
+        return _claude_vision_client
+    api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+        _claude_vision_client = anthropic.Anthropic(api_key=api_key, timeout=20.0)
+        return _claude_vision_client
+    except Exception as exc:
+        logger.warning("Claude Vision init failed: %s", exc)
+        return None
+
+
+VISION_PROMPT = """You are a forensic image analyst. Decide if this image is AI-generated (Stable Diffusion / Midjourney / DALL-E / Flux / Sora) or a real photograph / human-made artwork.
+
+Look for: diffusion artefacts, plastic/oversmooth skin, malformed hands or eyes, illegible text, impossible shadows, repeating textures, unnaturally symmetric faces, painterly noise, missing pores, weird jewellery/teeth, melted backgrounds.
+
+Calibrate honestly:
+  0-20  = real DSLR/phone photo
+  21-40 = real photo with heavy filter / edit
+  41-60 = ambiguous / can't tell
+  61-80 = likely AI-generated
+  81-100 = obvious AI art
+
+Return STRICT JSON only, no prose:
+{
+  "ai_score": <0-100>,
+  "verdict": "real" | "edited" | "ambiguous" | "likely_ai" | "obvious_ai",
+  "indicators": [<3-6 short specific visual indicators you actually see>],
+  "reasoning": "<2-3 sentences explaining the call>"
+}"""
+
+
+def _shrink_for_vision(image_bytes: bytes, max_side: int = 768) -> tuple[bytes, str]:
+    """Resize image so max side <= max_side; returns (jpeg_bytes, mime)."""
+    if not Image:
+        return image_bytes, "image/jpeg"
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        if max(img.width, img.height) > max_side:
+            ratio = max_side / max(img.width, img.height)
+            img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return image_bytes, "image/jpeg"
+
+
+def call_openai_vision(image_bytes: bytes) -> dict:
+    """Ask GPT-4o-mini to score AI-generation likelihood."""
+    client = _get_openai_vision()
+    if client is None:
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "", "model": "none"}
+    try:
+        small, mime = _shrink_for_vision(image_bytes)
+        b64 = base64.b64encode(small).decode("ascii")
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                ],
+            }],
+            temperature=0.1,
+            max_tokens=400,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        return {
+            "available": True,
+            "model": "gpt-4o-mini",
+            "ai_score": int(data.get("ai_score", 0)),
+            "verdict": data.get("verdict", "unknown"),
+            "indicators": data.get("indicators", []) or [],
+            "reasoning": data.get("reasoning", "") or "",
+        }
+    except Exception as exc:
+        logger.warning("OpenAI Vision error: %s", exc)
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "gpt-4o-mini"}
+
+
+def call_claude_vision(image_bytes: bytes) -> dict:
+    """Ask Claude to score AI-generation likelihood."""
+    client = _get_claude_vision()
+    if client is None:
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "", "model": "none"}
+    try:
+        small, mime = _shrink_for_vision(image_bytes)
+        b64 = base64.b64encode(small).decode("ascii")
+        msg = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=500,
+            system=VISION_PROMPT + "\n\nReturn raw JSON only — no markdown fences.",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
+                    {"type": "text", "text": "Analyse this image."},
+                ],
+            }],
+        )
+        raw = "".join(b.text for b in msg.content if hasattr(b, "text")).strip()
+        if raw.startswith("```"):
+            import re as _re
+            raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=_re.IGNORECASE).strip()
+        data = json.loads(raw)
+        return {
+            "available": True,
+            "model": "claude-3-5-haiku",
+            "ai_score": int(data.get("ai_score", 0)),
+            "verdict": data.get("verdict", "unknown"),
+            "indicators": data.get("indicators", []) or [],
+            "reasoning": data.get("reasoning", "") or "",
+        }
+    except Exception as exc:
+        logger.warning("Claude Vision error: %s", exc)
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "claude-3-5-haiku"}
 
 
 # ── 1. EXIF Metadata Extraction ──────────────────────────────────────────────
@@ -585,34 +737,77 @@ def get_recommendation(risk_score: int) -> dict:
 # ── 7. Full Analysis Pipeline ────────────────────────────────────────────────
 
 def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str = "") -> dict:
-    """Run complete image analysis pipeline."""
+    """Run complete multi-method ensemble image analysis pipeline.
+
+    Sources (auto-detected):
+      • EXIF metadata           — authenticity baseline
+      • Pixel forensics         — noise / gradient / pattern signatures
+      • HuggingFace classifier  — pretrained AI-detection model
+      • OpenAI Vision           — semantic realism reasoning
+      • Claude Vision           — artefact reasoning
+    """
 
     # Step 1: Metadata
     metadata = extract_exif_metadata(image_bytes, filename)
-
-    # Step 2: Score metadata
     meta_result = score_metadata(metadata)
     metadata_score = meta_result["score"]
 
-    # Step 3: Pixel analysis
+    # Step 2: Pixel forensics
     pixel_analysis = analyze_pixel_patterns(image_bytes)
     pixel_score = pixel_analysis["overallScore"]
 
-    # Step 4: HuggingFace
+    # Step 3: HuggingFace
     hf_result = call_huggingface_api(image_bytes)
     hf_score = hf_result.get("aiGenerationScore", 0)
 
-    # Step 5: Combined score
-    if hf_result.get("available"):
-        # With HuggingFace: metadata 25%, pixel 35%, HuggingFace 40%
-        final_score = int(metadata_score * 0.25 + pixel_score * 0.35 + hf_score * 0.40)
+    # Step 4: Vision LLM ensemble
+    openai_vision = call_openai_vision(image_bytes)
+    claude_vision = call_claude_vision(image_bytes)
+
+    vision_results = []
+    if openai_vision.get("available"):
+        vision_results.append(openai_vision)
+    if claude_vision.get("available"):
+        vision_results.append(claude_vision)
+
+    vision_score = (
+        sum(v["ai_score"] for v in vision_results) // len(vision_results)
+        if vision_results else 0
+    )
+    vision_available = len(vision_results) > 0
+
+    # Step 5: Weighted ensemble — vision LLMs carry the most weight when present
+    # because they understand semantic content (faces, hands, scenes), while
+    # forensic signals are noisy on their own.
+    weights = {"metadata": 0.0, "pixel": 0.0, "hf": 0.0, "vision": 0.0}
+
+    if vision_available and hf_result.get("available"):
+        weights = {"metadata": 0.10, "pixel": 0.20, "hf": 0.20, "vision": 0.50}
+    elif vision_available:
+        weights = {"metadata": 0.15, "pixel": 0.25, "hf": 0.0, "vision": 0.60}
+    elif hf_result.get("available"):
+        weights = {"metadata": 0.20, "pixel": 0.35, "hf": 0.45, "vision": 0.0}
     else:
-        # Without HuggingFace: metadata 35%, pixel 65%
-        final_score = int(metadata_score * 0.35 + pixel_score * 0.65)
+        weights = {"metadata": 0.35, "pixel": 0.65, "hf": 0.0, "vision": 0.0}
+
+    final_score = int(
+        metadata_score * weights["metadata"]
+        + pixel_score * weights["pixel"]
+        + hf_score * weights["hf"]
+        + vision_score * weights["vision"]
+    )
+
+    # Calibration: if both vision LLMs strongly agree, trust them more
+    if len(vision_results) == 2:
+        agree = abs(vision_results[0]["ai_score"] - vision_results[1]["ai_score"]) <= 20
+        avg_v = (vision_results[0]["ai_score"] + vision_results[1]["ai_score"]) // 2
+        if agree and avg_v >= 75:
+            final_score = max(final_score, avg_v - 5)
+        elif agree and avg_v <= 20:
+            final_score = min(final_score, avg_v + 10)
 
     final_score = max(0, min(100, final_score))
 
-    # Step 6: Classification
     if final_score <= 30:
         classification = "Likely Authentic"
     elif final_score <= 60:
@@ -620,22 +815,48 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
     else:
         classification = "Likely AI-Generated"
 
-    # Step 7: Flags
     flags = generate_flags(metadata, pixel_analysis, hf_result)
 
-    # Step 8: Recommendation
+    # Add Vision-LLM flags
+    for v in vision_results:
+        if v["ai_score"] >= 70:
+            flags.append({
+                "flag": f"vision_{v['model']}",
+                "label": f"Vision AI ({v['model']})",
+                "severity": "high",
+                "detail": f"{v['model']} confidence: {v['ai_score']}% — {v.get('verdict', 'likely AI')}",
+            })
+
     recommendation = get_recommendation(final_score)
 
-    # Step 9: Confidence
-    indicator_count = len(meta_result["indicators"]) + len(pixel_analysis.get("indicators", [])) + len(flags)
-    confidence = min(95, 50 + indicator_count * 5)
-    if hf_result.get("available"):
-        confidence = min(98, confidence + 15)
+    # Confidence: more independent sources = higher confidence
+    sources_count = (
+        1
+        + (1 if hf_result.get("available") else 0)
+        + len(vision_results)
+    )
+    confidence = min(98, 55 + sources_count * 10 + len(flags) * 2)
 
-    # Combine all indicators
-    all_indicators = meta_result["indicators"] + pixel_analysis.get("indicators", [])
+    # Combine indicators from all sources
+    all_indicators = list(meta_result["indicators"]) + list(pixel_analysis.get("indicators", []))
+    for v in vision_results:
+        for ind in v.get("indicators", [])[:4]:
+            all_indicators.append({
+                "signal": str(ind),
+                "detail": f"Visual indicator from {v['model']}",
+                "severity": "high" if v["ai_score"] >= 70 else "medium",
+                "type": "red" if v["ai_score"] >= 70 else "yellow",
+            })
 
-    # Tips
+    # Build a unified "Why flagged?" reasoning
+    reasoning_parts = []
+    for v in vision_results:
+        if v.get("reasoning"):
+            reasoning_parts.append(f"[{v['model']}] {v['reasoning']}")
+    why_flagged = " ".join(reasoning_parts) if reasoning_parts else (
+        f"Forensic signals: metadata score {metadata_score}/100, pixel-pattern score {pixel_score}/100."
+    )
+
     tips = []
     if final_score > 30:
         tips.append("Use Google Reverse Image Search to verify the origin.")
@@ -668,6 +889,14 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
             "available": hf_result.get("available", False),
             "raw": hf_result.get("raw", {}),
         },
+        "visionAnalysis": {
+            "available": vision_available,
+            "ensembleScore": vision_score,
+            "openai": openai_vision,
+            "claude": claude_vision,
+            "reasoning": why_flagged,
+        },
+        "whyFlagged": why_flagged,
         "flags": flags,
         "recommendation": recommendation,
         "confidence": confidence,
@@ -677,10 +906,13 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
             "metadata": metadata_score,
             "pixelAnalysis": pixel_score,
             "aiModel": hf_score if hf_result.get("available") else None,
+            "visionLLM": vision_score if vision_available else None,
             "weights": {
-                "metadata": 0.25 if hf_result.get("available") else 0.35,
-                "pixelAnalysis": 0.35 if hf_result.get("available") else 0.65,
-                "aiModel": 0.40 if hf_result.get("available") else 0,
-            }
+                "metadata": weights["metadata"],
+                "pixelAnalysis": weights["pixel"],
+                "aiModel": weights["hf"],
+                "visionLLM": weights["vision"],
+            },
+            "sourcesUsed": sources_count,
         },
     }
