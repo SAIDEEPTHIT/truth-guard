@@ -6,7 +6,9 @@ Graceful fallback if HuggingFace API is unavailable.
 
 import io
 import os
+import json
 import math
+import base64
 import struct
 import logging
 from typing import Optional
@@ -26,6 +28,156 @@ except ImportError:
 import requests as http_requests
 
 logger = logging.getLogger(__name__)
+
+
+# ── Lazy Vision LLM clients ──────────────────────────────────────────────────
+
+_openai_vision_client = None
+_claude_vision_client = None
+
+
+def _get_openai_vision():
+    global _openai_vision_client
+    if _openai_vision_client is not None:
+        return _openai_vision_client
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI
+        _openai_vision_client = OpenAI(api_key=api_key, timeout=20.0)
+        return _openai_vision_client
+    except Exception as exc:
+        logger.warning("OpenAI Vision init failed: %s", exc)
+        return None
+
+
+def _get_claude_vision():
+    global _claude_vision_client
+    if _claude_vision_client is not None:
+        return _claude_vision_client
+    api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+        _claude_vision_client = anthropic.Anthropic(api_key=api_key, timeout=20.0)
+        return _claude_vision_client
+    except Exception as exc:
+        logger.warning("Claude Vision init failed: %s", exc)
+        return None
+
+
+VISION_PROMPT = """You are a forensic image analyst. Decide if this image is AI-generated (Stable Diffusion / Midjourney / DALL-E / Flux / Sora) or a real photograph / human-made artwork.
+
+Look for: diffusion artefacts, plastic/oversmooth skin, malformed hands or eyes, illegible text, impossible shadows, repeating textures, unnaturally symmetric faces, painterly noise, missing pores, weird jewellery/teeth, melted backgrounds.
+
+Calibrate honestly:
+  0-20  = real DSLR/phone photo
+  21-40 = real photo with heavy filter / edit
+  41-60 = ambiguous / can't tell
+  61-80 = likely AI-generated
+  81-100 = obvious AI art
+
+Return STRICT JSON only, no prose:
+{
+  "ai_score": <0-100>,
+  "verdict": "real" | "edited" | "ambiguous" | "likely_ai" | "obvious_ai",
+  "indicators": [<3-6 short specific visual indicators you actually see>],
+  "reasoning": "<2-3 sentences explaining the call>"
+}"""
+
+
+def _shrink_for_vision(image_bytes: bytes, max_side: int = 768) -> tuple[bytes, str]:
+    """Resize image so max side <= max_side; returns (jpeg_bytes, mime)."""
+    if not Image:
+        return image_bytes, "image/jpeg"
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        if max(img.width, img.height) > max_side:
+            ratio = max_side / max(img.width, img.height)
+            img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return image_bytes, "image/jpeg"
+
+
+def call_openai_vision(image_bytes: bytes) -> dict:
+    """Ask GPT-4o-mini to score AI-generation likelihood."""
+    client = _get_openai_vision()
+    if client is None:
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "", "model": "none"}
+    try:
+        small, mime = _shrink_for_vision(image_bytes)
+        b64 = base64.b64encode(small).decode("ascii")
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                ],
+            }],
+            temperature=0.1,
+            max_tokens=400,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        return {
+            "available": True,
+            "model": "gpt-4o-mini",
+            "ai_score": int(data.get("ai_score", 0)),
+            "verdict": data.get("verdict", "unknown"),
+            "indicators": data.get("indicators", []) or [],
+            "reasoning": data.get("reasoning", "") or "",
+        }
+    except Exception as exc:
+        logger.warning("OpenAI Vision error: %s", exc)
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "gpt-4o-mini"}
+
+
+def call_claude_vision(image_bytes: bytes) -> dict:
+    """Ask Claude to score AI-generation likelihood."""
+    client = _get_claude_vision()
+    if client is None:
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "", "model": "none"}
+    try:
+        small, mime = _shrink_for_vision(image_bytes)
+        b64 = base64.b64encode(small).decode("ascii")
+        msg = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=500,
+            system=VISION_PROMPT + "\n\nReturn raw JSON only — no markdown fences.",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
+                    {"type": "text", "text": "Analyse this image."},
+                ],
+            }],
+        )
+        raw = "".join(b.text for b in msg.content if hasattr(b, "text")).strip()
+        if raw.startswith("```"):
+            import re as _re
+            raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=_re.IGNORECASE).strip()
+        data = json.loads(raw)
+        return {
+            "available": True,
+            "model": "claude-3-5-haiku",
+            "ai_score": int(data.get("ai_score", 0)),
+            "verdict": data.get("verdict", "unknown"),
+            "indicators": data.get("indicators", []) or [],
+            "reasoning": data.get("reasoning", "") or "",
+        }
+    except Exception as exc:
+        logger.warning("Claude Vision error: %s", exc)
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "claude-3-5-haiku"}
 
 
 # ── 1. EXIF Metadata Extraction ──────────────────────────────────────────────
