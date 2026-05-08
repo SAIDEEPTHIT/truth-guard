@@ -737,34 +737,77 @@ def get_recommendation(risk_score: int) -> dict:
 # ── 7. Full Analysis Pipeline ────────────────────────────────────────────────
 
 def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str = "") -> dict:
-    """Run complete image analysis pipeline."""
+    """Run complete multi-method ensemble image analysis pipeline.
+
+    Sources (auto-detected):
+      • EXIF metadata           — authenticity baseline
+      • Pixel forensics         — noise / gradient / pattern signatures
+      • HuggingFace classifier  — pretrained AI-detection model
+      • OpenAI Vision           — semantic realism reasoning
+      • Claude Vision           — artefact reasoning
+    """
 
     # Step 1: Metadata
     metadata = extract_exif_metadata(image_bytes, filename)
-
-    # Step 2: Score metadata
     meta_result = score_metadata(metadata)
     metadata_score = meta_result["score"]
 
-    # Step 3: Pixel analysis
+    # Step 2: Pixel forensics
     pixel_analysis = analyze_pixel_patterns(image_bytes)
     pixel_score = pixel_analysis["overallScore"]
 
-    # Step 4: HuggingFace
+    # Step 3: HuggingFace
     hf_result = call_huggingface_api(image_bytes)
     hf_score = hf_result.get("aiGenerationScore", 0)
 
-    # Step 5: Combined score
-    if hf_result.get("available"):
-        # With HuggingFace: metadata 25%, pixel 35%, HuggingFace 40%
-        final_score = int(metadata_score * 0.25 + pixel_score * 0.35 + hf_score * 0.40)
+    # Step 4: Vision LLM ensemble
+    openai_vision = call_openai_vision(image_bytes)
+    claude_vision = call_claude_vision(image_bytes)
+
+    vision_results = []
+    if openai_vision.get("available"):
+        vision_results.append(openai_vision)
+    if claude_vision.get("available"):
+        vision_results.append(claude_vision)
+
+    vision_score = (
+        sum(v["ai_score"] for v in vision_results) // len(vision_results)
+        if vision_results else 0
+    )
+    vision_available = len(vision_results) > 0
+
+    # Step 5: Weighted ensemble — vision LLMs carry the most weight when present
+    # because they understand semantic content (faces, hands, scenes), while
+    # forensic signals are noisy on their own.
+    weights = {"metadata": 0.0, "pixel": 0.0, "hf": 0.0, "vision": 0.0}
+
+    if vision_available and hf_result.get("available"):
+        weights = {"metadata": 0.10, "pixel": 0.20, "hf": 0.20, "vision": 0.50}
+    elif vision_available:
+        weights = {"metadata": 0.15, "pixel": 0.25, "hf": 0.0, "vision": 0.60}
+    elif hf_result.get("available"):
+        weights = {"metadata": 0.20, "pixel": 0.35, "hf": 0.45, "vision": 0.0}
     else:
-        # Without HuggingFace: metadata 35%, pixel 65%
-        final_score = int(metadata_score * 0.35 + pixel_score * 0.65)
+        weights = {"metadata": 0.35, "pixel": 0.65, "hf": 0.0, "vision": 0.0}
+
+    final_score = int(
+        metadata_score * weights["metadata"]
+        + pixel_score * weights["pixel"]
+        + hf_score * weights["hf"]
+        + vision_score * weights["vision"]
+    )
+
+    # Calibration: if both vision LLMs strongly agree, trust them more
+    if len(vision_results) == 2:
+        agree = abs(vision_results[0]["ai_score"] - vision_results[1]["ai_score"]) <= 20
+        avg_v = (vision_results[0]["ai_score"] + vision_results[1]["ai_score"]) // 2
+        if agree and avg_v >= 75:
+            final_score = max(final_score, avg_v - 5)
+        elif agree and avg_v <= 20:
+            final_score = min(final_score, avg_v + 10)
 
     final_score = max(0, min(100, final_score))
 
-    # Step 6: Classification
     if final_score <= 30:
         classification = "Likely Authentic"
     elif final_score <= 60:
@@ -772,22 +815,48 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
     else:
         classification = "Likely AI-Generated"
 
-    # Step 7: Flags
     flags = generate_flags(metadata, pixel_analysis, hf_result)
 
-    # Step 8: Recommendation
+    # Add Vision-LLM flags
+    for v in vision_results:
+        if v["ai_score"] >= 70:
+            flags.append({
+                "flag": f"vision_{v['model']}",
+                "label": f"Vision AI ({v['model']})",
+                "severity": "high",
+                "detail": f"{v['model']} confidence: {v['ai_score']}% — {v.get('verdict', 'likely AI')}",
+            })
+
     recommendation = get_recommendation(final_score)
 
-    # Step 9: Confidence
-    indicator_count = len(meta_result["indicators"]) + len(pixel_analysis.get("indicators", [])) + len(flags)
-    confidence = min(95, 50 + indicator_count * 5)
-    if hf_result.get("available"):
-        confidence = min(98, confidence + 15)
+    # Confidence: more independent sources = higher confidence
+    sources_count = (
+        1
+        + (1 if hf_result.get("available") else 0)
+        + len(vision_results)
+    )
+    confidence = min(98, 55 + sources_count * 10 + len(flags) * 2)
 
-    # Combine all indicators
-    all_indicators = meta_result["indicators"] + pixel_analysis.get("indicators", [])
+    # Combine indicators from all sources
+    all_indicators = list(meta_result["indicators"]) + list(pixel_analysis.get("indicators", []))
+    for v in vision_results:
+        for ind in v.get("indicators", [])[:4]:
+            all_indicators.append({
+                "signal": str(ind),
+                "detail": f"Visual indicator from {v['model']}",
+                "severity": "high" if v["ai_score"] >= 70 else "medium",
+                "type": "red" if v["ai_score"] >= 70 else "yellow",
+            })
 
-    # Tips
+    # Build a unified "Why flagged?" reasoning
+    reasoning_parts = []
+    for v in vision_results:
+        if v.get("reasoning"):
+            reasoning_parts.append(f"[{v['model']}] {v['reasoning']}")
+    why_flagged = " ".join(reasoning_parts) if reasoning_parts else (
+        f"Forensic signals: metadata score {metadata_score}/100, pixel-pattern score {pixel_score}/100."
+    )
+
     tips = []
     if final_score > 30:
         tips.append("Use Google Reverse Image Search to verify the origin.")
@@ -820,6 +889,14 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
             "available": hf_result.get("available", False),
             "raw": hf_result.get("raw", {}),
         },
+        "visionAnalysis": {
+            "available": vision_available,
+            "ensembleScore": vision_score,
+            "openai": openai_vision,
+            "claude": claude_vision,
+            "reasoning": why_flagged,
+        },
+        "whyFlagged": why_flagged,
         "flags": flags,
         "recommendation": recommendation,
         "confidence": confidence,
@@ -829,10 +906,13 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
             "metadata": metadata_score,
             "pixelAnalysis": pixel_score,
             "aiModel": hf_score if hf_result.get("available") else None,
+            "visionLLM": vision_score if vision_available else None,
             "weights": {
-                "metadata": 0.25 if hf_result.get("available") else 0.35,
-                "pixelAnalysis": 0.35 if hf_result.get("available") else 0.65,
-                "aiModel": 0.40 if hf_result.get("available") else 0,
-            }
+                "metadata": weights["metadata"],
+                "pixelAnalysis": weights["pixel"],
+                "aiModel": weights["hf"],
+                "visionLLM": weights["vision"],
+            },
+            "sourcesUsed": sources_count,
         },
     }
