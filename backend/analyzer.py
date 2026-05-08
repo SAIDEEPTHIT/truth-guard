@@ -1,17 +1,24 @@
-"""TruthShield – OpenAI-Powered Analysis Module v4.0
+"""TruthShield – Hybrid Multi-Model Text Analysis Engine v7.0
 
-Primary engine: OpenAI GPT-4o-mini (structured JSON classification)
-Fallback engine: Rule-based keyword heuristics (offline / quota-exceeded)
+Ensemble of:
+  1. OpenAI GPT-4o-mini  (semantic + contextual reasoning)
+  2. Anthropic Claude    (secondary reasoning + manipulation analysis)
+  3. Local rule engine   (deterministic guarantees, India-specific scams)
 
-Environment variables:
-  OPENAI_API_KEY – API key from https://platform.openai.com/api-keys
+Auto-detects available APIs. Gracefully degrades:
+  - All 3 available  → full ensemble (best accuracy)
+  - 1-2 LLMs down    → remaining LLM + heuristics
+  - All LLMs down    → pure heuristic engine (still useful)
+
+Environment variables (any subset works):
+  OPENAI_API_KEY     – https://platform.openai.com/api-keys
+  CLAUDE_API_KEY     – https://console.anthropic.com/
 """
 
 from __future__ import annotations
 import re
 import os
 import json
-import math
 import struct
 import logging
 from dataclasses import dataclass, field
@@ -25,9 +32,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ── OpenAI client (lazy init) ────────────────────────────────────────────────
+# ── Lazy LLM clients ──────────────────────────────────────────────────────────
 
 _openai_client = None
+_claude_client = None
 
 
 def _get_openai_client():
@@ -36,18 +44,33 @@ def _get_openai_client():
         return _openai_client
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        logger.warning("OPENAI_API_KEY not set – falling back to heuristic engine.")
         return None
     try:
         from openai import OpenAI
-        _openai_client = OpenAI(api_key=api_key)
+        _openai_client = OpenAI(api_key=api_key, timeout=15.0)
         return _openai_client
     except Exception as exc:
-        logger.error("Failed to init OpenAI client: %s", exc)
+        logger.error("OpenAI init failed: %s", exc)
         return None
 
 
-# ── Data classes ─────────────────────────────────────────────────────────────
+def _get_claude_client():
+    global _claude_client
+    if _claude_client is not None:
+        return _claude_client
+    api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+        _claude_client = anthropic.Anthropic(api_key=api_key, timeout=15.0)
+        return _claude_client
+    except Exception as exc:
+        logger.warning("Anthropic init failed (install `anthropic`): %s", exc)
+        return None
+
+
+# ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
 class AnalysisResult:
@@ -56,51 +79,190 @@ class AnalysisResult:
     scam_type: str = "Safe"
     emotional_manipulation: bool = False
     signals: dict = field(default_factory=dict)
-    suspicious_phrases: list[str] = field(default_factory=list)
+    suspicious_phrases: list = field(default_factory=list)
     highlighted_text: str = ""
-    explanations: list[dict] = field(default_factory=list)
+    explanations: list = field(default_factory=list)
     summary: str = ""
-    tips: list[str] = field(default_factory=list)
+    tips: list = field(default_factory=list)
 
 
 @dataclass
 class ImageAnalysisResult:
     ai_generated_probability: float = 0.0
     classification: str = "Likely Authentic"
-    explanation: list[dict] = field(default_factory=list)
+    explanation: list = field(default_factory=list)
     risk_score: int = 0
     metadata: dict = field(default_factory=dict)
-    tips: list[str] = field(default_factory=list)
+    tips: list = field(default_factory=list)
 
 
-# ── OpenAI prompt ────────────────────────────────────────────────────────────
+# ── Heuristic keyword banks ───────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an advanced cybersecurity AI specialized in detecting scams, phishing, fraud, and manipulation, especially for Indian users.
+SCAM_KEYWORDS = [
+    "wire transfer", "western union", "bitcoin", "crypto wallet", "gift card",
+    "send money", "processing fee", "registration fee", "advance fee",
+    "claim your prize", "you have won", "selected as winner", "lottery winner",
+    "inheritance", "bequeathed", "next of kin", "compensation fund",
+    "verify your account", "verify bank account", "update kyc", "kyc expired",
+    "account suspended", "account blocked", "account will be deactivated",
+    "share otp", "tell otp", "your otp is", "do not share otp",
+    "click this link", "click here to claim", "click below to verify",
+    "remote job", "work from home", "no experience needed", "earn ₹",
+    "earn rs", "earn lakhs", "limited vacancies", "limited seats",
+    "investment opportunity", "guaranteed returns", "double your money",
+    "100% returns", "risk free investment", "trading signals",
+    "loan approved", "instant loan", "pre-approved loan",
+    "tax refund", "income tax refund", "refund pending",
+]
 
-STRICT RULES:
-- Any job offer asking for payment = HIGH RISK (score > 80)
-- Any bank verification link = HIGH RISK
-- Any urgent message threatening loss = HIGH RISK
-- Messages asking for OTP/payment/personal info = HIGH RISK
-- Lottery/prize/inheritance scams = HIGH RISK (score > 85)
-- Safe professional/business content = LOW RISK (score < 25)
-- Mildly promotional but legitimate content = score 20-40
+URGENCY_PHRASES = [
+    "act now", "act immediately", "urgent", "urgent action required",
+    "within 24 hours", "within 24 hrs", "expires today", "expires soon",
+    "limited time", "last chance", "final notice", "final warning",
+    "immediately", "right now", "hurry", "don't miss",
+    "if you cared", "if you love", "you will lose",
+]
 
-Analyze the text and return STRICT JSON (no markdown, no explanation outside JSON):
+INDIA_SCAM = [
+    "aadhaar", "aadhar", "pan card", "pan number", "uidai",
+    "sbi", "hdfc", "icici", "axis bank", "kotak", "yes bank",
+    "upi", "phonepe", "google pay", "paytm",
+    "kyc", "kyc update", "kyc pending", "kyc expired",
+    "irctc", "income tax department", "gst notice",
+    "courier blocked", "fedex parcel", "customs clearance",
+    "narcotics", "money laundering case", "cbi", "police case",
+    "bsnl", "jio recharge", "electricity bill due", "disconnection",
+]
+
+FINANCIAL_PHRASES = [
+    "₹", "rs.", "rs ", "rupees", "lakhs", "crore", "dollars",
+    "$", "usd", "inr", "payment", "pay now", "transfer",
+]
+
+AI_TEXT_MARKERS = [
+    "in conclusion", "it is important to note", "furthermore", "moreover",
+    "delve into", "tapestry", "navigate the complexities", "in today's",
+    "leveraging", "synergy", "robust", "seamlessly", "comprehensive overview",
+    "it's worth noting", "as an ai", "i don't have personal",
+]
+
+# ── Contextual pattern combinations (very high confidence scams) ──────────────
+
+CONTEXTUAL_PATTERNS = [
+    {
+        "name": "Lottery Scam",
+        "trigger_groups": [
+            ["won", "winner", "lottery", "prize", "selected"],
+            ["fee", "tax", "processing", "claim", "transfer", "deposit"],
+        ],
+        "scam_type": "Financial Fraud",
+        "min_score": 88,
+        "reason": "Lottery winnings combined with upfront payment requests are classic advance-fee fraud — real lotteries never ask winners to pay.",
+    },
+    {
+        "name": "Fake Job",
+        "trigger_groups": [
+            ["job", "hiring", "vacancy", "position", "offer letter", "remote work"],
+            ["fee", "registration", "deposit", "security amount", "training fee", "kit fee"],
+        ],
+        "scam_type": "Job Scam",
+        "min_score": 85,
+        "reason": "Legitimate employers never charge candidates a fee. Asking for payment for registration, training kits, or 'security deposit' is a hallmark of fake job scams targeting Indian job-seekers.",
+    },
+    {
+        "name": "Bank Phishing",
+        "trigger_groups": [
+            ["bank", "account", "sbi", "hdfc", "icici", "axis", "kotak"],
+            ["verify", "update", "kyc", "blocked", "suspended", "deactivate"],
+            ["click", "link", "http", "bit.ly", "tinyurl"],
+        ],
+        "scam_type": "Phishing",
+        "min_score": 90,
+        "reason": "Banks never send verification links via SMS or email. Clicking will likely steal your credentials. Always log in via the official app or website directly.",
+    },
+    {
+        "name": "OTP / KYC Theft",
+        "trigger_groups": [
+            ["otp", "one time password", "verification code"],
+            ["share", "tell", "give", "send", "provide"],
+        ],
+        "scam_type": "Phishing",
+        "min_score": 92,
+        "reason": "Anyone asking you to share an OTP is attempting fraud. RBI guidelines state no bank or legitimate service will ever request your OTP.",
+    },
+    {
+        "name": "Aadhaar / PAN Scam",
+        "trigger_groups": [
+            ["aadhaar", "aadhar", "pan card", "uidai"],
+            ["blocked", "suspended", "deactivate", "verify", "update", "expire"],
+        ],
+        "scam_type": "Phishing",
+        "min_score": 87,
+        "reason": "UIDAI and Income Tax Department never threaten deactivation via SMS. This pattern targets fear of identity loss to extract personal data.",
+    },
+    {
+        "name": "Investment / Crypto Scam",
+        "trigger_groups": [
+            ["invest", "investment", "crypto", "bitcoin", "trading", "stocks"],
+            ["guaranteed", "100%", "double", "risk free", "no risk", "assured returns"],
+        ],
+        "scam_type": "Financial Fraud",
+        "min_score": 84,
+        "reason": "No legitimate investment guarantees returns. SEBI explicitly warns that 'guaranteed' or 'risk-free' investment promises are almost always Ponzi schemes.",
+    },
+    {
+        "name": "Courier / Customs Scam",
+        "trigger_groups": [
+            ["courier", "parcel", "fedex", "dhl", "package", "shipment"],
+            ["customs", "narcotics", "cbi", "police", "case", "arrest", "charge"],
+        ],
+        "scam_type": "Phishing",
+        "min_score": 89,
+        "reason": "The 'FedEx/DHL parcel + narcotics' scam is widespread in India in 2024-25. CBI and Mumbai Police never call victims directly to demand payment.",
+    },
+    {
+        "name": "Emotional Money Pressure",
+        "trigger_groups": [
+            ["if you", "love", "care", "trust", "family", "emergency"],
+            ["money", "send", "transfer", "pay", "₹", "rs", "lakhs"],
+        ],
+        "scam_type": "Financial Fraud",
+        "min_score": 70,
+        "reason": "Combining emotional appeals ('if you cared', family emergencies) with money requests is a classic manipulation tactic — verify via a separate channel before sending anything.",
+    },
+]
+
+
+# ── OpenAI prompt (structured) ────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """You are TruthShield's senior cybersecurity analyst specialising in scams targeting Indian users.
+
+Calibrate scores realistically. Do NOT inflate scores for benign content.
+
+SCORING GUIDE (0-100 risk_score):
+  0-15  → Casual/normal/educational text, no red flags
+  16-30 → Mildly promotional but legitimate marketing
+  31-50 → Suspicious tone or unverified claims (worth caution)
+  51-69 → Likely scam — multiple manipulation signals
+  70-85 → High-confidence scam (job-fee, lottery, urgent verify, etc.)
+  86-100 → Textbook fraud (OTP theft, courier-narcotics, bank phishing link)
+
+ALSO score `ai_generated_probability` 0-100 separately (corporate buzzwords, em-dashes, "delve into", "tapestry", overuse of transitional phrases all raise this).
+
+Return STRICT JSON only:
 {
-  "risk_score": <number 0-100>,
+  "risk_score": <0-100>,
   "classification": "Safe" | "Suspicious" | "High Risk",
   "scam_type": "Phishing" | "Job Scam" | "Financial Fraud" | "Misinformation" | "AI Generated" | "Safe",
-  "emotional_manipulation": <boolean>,
-  "ai_generated_probability": <number 0-100>,
-  "suspicious_phrases": [<list of exact suspicious phrases found>],
-  "explanation": "<clear short explanation of why this is safe or dangerous>",
-  "tips": [<1-3 actionable safety tips>]
+  "emotional_manipulation": <bool>,
+  "ai_generated_probability": <0-100>,
+  "suspicious_phrases": [<exact substrings copied from input>],
+  "explanation": "<2-3 sentence WHY — describe the specific pattern detected and why it's dangerous (or safe). Be concrete.>",
+  "tips": [<2-3 actionable, India-specific safety tips>]
 }"""
 
 
 def _call_openai(text: str) -> Optional[dict]:
-    """Call OpenAI GPT-4o-mini and return parsed JSON, or None on failure."""
     client = _get_openai_client()
     if client is None:
         return None
@@ -109,182 +271,328 @@ def _call_openai(text: str) -> Optional[dict]:
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Analyze this text:\n\n{text[:8000]}"},
+                {"role": "user", "content": f"Analyse:\n\n{text[:8000]}"},
             ],
             temperature=0.1,
-            max_tokens=1000,
+            max_tokens=900,
             response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content
-        if content:
-            return json.loads(content)
-        return None
+        return json.loads(content) if content else None
     except Exception as exc:
-        logger.error("OpenAI API error: %s", exc)
+        logger.warning("OpenAI call failed: %s", exc)
         return None
 
 
-# ── Main Text Analysis ──
-
-def analyze_text(text: str) -> AnalysisResult:
-    result = _gpt_analyze_text(text)
-
-    if result is not None:
-        print("✅ USING GEMINI")
-        return result
-# ── Rule-based overrides ─────────────────────────────────────────────────────
-
-def _apply_rule_overrides(text: str, result: dict) -> dict:
-    """Apply deterministic rule overrides to ensure obvious scams score high."""
-    lower = text.lower()
-
-    rules = [
-        # Job scam: payment + job
-        (["pay", "fee", "₹", "rs."] , ["job", "offer", "hiring", "vacancy", "salary"], "Job Scam", 82),
-        # Bank phishing: bank + verify + click/link
-        (["bank", "sbi", "hdfc", "icici"], ["verify", "click", "link", "update"], "Phishing", 85),
-        # OTP/KYC theft
-        (["otp", "share otp", "kyc update"], ["aadhaar", "pan card", "blocked", "deactivate"], "Phishing", 88),
-        # Lottery/prize
-        (["lottery", "winner", "prize", "congratulations"], ["claim", "selected", "million"], "Financial Fraud", 87),
-        # Wire/payment demand
-        (["wire transfer", "processing fee", "send money", "western union"], [], "Financial Fraud", 80),
-        # Urgency + financial
-        (["immediately", "urgent", "within 24 hours", "act now"], ["pay", "transfer", "send", "₹", "bank"], "Financial Fraud", 78),
-    ]
-
-    for group_a, group_b, scam_type, min_score in rules:
-        has_a = any(kw in lower for kw in group_a)
-        has_b = not group_b or any(kw in lower for kw in group_b)
-        if has_a and has_b:
-            if result.get("risk_score", 0) < min_score:
-                result["risk_score"] = min_score
-                result["classification"] = "High Risk"
-                result["scam_type"] = scam_type
-            break
-
-    return result
+def _call_claude(text: str) -> Optional[dict]:
+    client = _get_claude_client()
+    if client is None:
+        return None
+    try:
+        msg = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=900,
+            system=SYSTEM_PROMPT + "\n\nReturn ONLY raw JSON, no markdown fences.",
+            messages=[{"role": "user", "content": f"Analyse:\n\n{text[:8000]}"}],
+        )
+        raw = "".join(b.text for b in msg.content if hasattr(b, "text")).strip()
+        # Strip ```json fences if Claude added them
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
+        return json.loads(raw)
+    except Exception as exc:
+        logger.warning("Claude call failed: %s", exc)
+        return None
 
 
-# ── Highlight helper ─────────────────────────────────────────────────────────
-
-def _highlight(text: str, phrases: list[str]) -> str:
-    result = text
-    for phrase in phrases:
-        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
-        result = pattern.sub(lambda m: f"<mark>{m.group()}</mark>", result)
-    return result
-
-    print("❌ USING FALLBACK (HEURISTICS)")
-    return _heuristic_analyze_text(text)
-
+# ── Heuristic engine ──────────────────────────────────────────────────────────
 
 def _heuristic_analyze(text: str) -> dict:
-    """Keyword-based fallback when OpenAI is unavailable."""
     lower = text.lower()
 
-    def find(bank, cat):
-        return [(kw, cat) for kw in bank if kw in lower]
+    def hits(bank):
+        return [kw for kw in bank if kw in lower]
 
-    scam_hits = find(SCAM_KEYWORDS, "scam")
-    urgency_hits = find(URGENCY_PHRASES, "urgency")
-    india_hits = find(INDIA_SCAM, "india_scam")
+    scam_hits = hits(SCAM_KEYWORDS)
+    urg_hits = hits(URGENCY_PHRASES)
+    india_hits = hits(INDIA_SCAM)
+    fin_hits = hits(FINANCIAL_PHRASES)
+    ai_hits = hits(AI_TEXT_MARKERS)
 
-    all_phrases = [h[0] for h in scam_hits + urgency_hits + india_hits]
-    financial_hits = [p for p in all_phrases if p in FINANCIAL_PHRASES]
+    base = (
+        len(scam_hits) * 12
+        + len(urg_hits) * 8
+        + len(india_hits) * 14
+        + len(fin_hits) * 4
+    )
+    score = max(0, min(100, base))
 
-    score = len(scam_hits) * 15 + len(urgency_hits) * 10 + len(india_hits) * 18 + len(financial_hits) * 5
-    score = max(0, min(100, score))
+    ai_prob = max(0, min(100, len(ai_hits) * 18))
+
+    scam_type = "Safe"
+    if india_hits and (urg_hits or scam_hits):
+        scam_type = "Phishing"
+    elif scam_hits and fin_hits:
+        scam_type = "Financial Fraud"
+    elif scam_hits:
+        scam_type = "Financial Fraud"
 
     classification = "Safe" if score <= 30 else "Suspicious" if score <= 60 else "High Risk"
 
-    scam_type = "Safe"
-    if india_hits:
-        scam_type = "Phishing"
-    elif scam_hits:
-        scam_type = "Financial Fraud"
+    all_phrases = list(set(scam_hits + urg_hits + india_hits))
 
     return {
         "risk_score": score,
         "classification": classification,
         "scam_type": scam_type,
-        "emotional_manipulation": len(urgency_hits) >= 2,
-        "ai_generated_probability": 0,
-        "suspicious_phrases": list(set(all_phrases)),
-        "explanation": f"Heuristic analysis found {len(all_phrases)} suspicious indicators.",
+        "emotional_manipulation": len(urg_hits) >= 2,
+        "ai_generated_probability": ai_prob,
+        "suspicious_phrases": all_phrases,
+        "explanation": f"Heuristic engine flagged {len(all_phrases)} suspicious indicators across {len([x for x in [scam_hits, urg_hits, india_hits] if x])} categories.",
         "tips": [
-            "Never share personal info via messages.",
-            "Verify sender through official channels.",
-        ] if score > 30 else ["Stay vigilant."],
+            "Verify the sender via a separate, official channel before acting.",
+            "Never share OTP, Aadhaar, PAN, or bank credentials over messages.",
+        ] if score > 30 else ["No strong red flags — but stay vigilant."],
+        "_source": "heuristic",
     }
 
 
-# ── Main analysis function ───────────────────────────────────────────────────
+# ── Contextual pattern overrides ──────────────────────────────────────────────
+
+def _apply_contextual_patterns(text: str, result: dict) -> dict:
+    lower = text.lower()
+    triggered = []
+
+    for pattern in CONTEXTUAL_PATTERNS:
+        groups_matched = sum(
+            1 for group in pattern["trigger_groups"]
+            if any(kw in lower for kw in group)
+        )
+        # Require ALL groups to match for strict patterns
+        if groups_matched == len(pattern["trigger_groups"]):
+            triggered.append(pattern)
+
+    if not triggered:
+        return result
+
+    # Pick the highest-confidence trigger
+    best = max(triggered, key=lambda p: p["min_score"])
+    if result.get("risk_score", 0) < best["min_score"]:
+        result["risk_score"] = best["min_score"]
+        result["classification"] = "High Risk"
+        result["scam_type"] = best["scam_type"]
+
+    # Append the contextual reason to the explanation
+    existing = result.get("explanation", "") or ""
+    add = f" Context match — {best['name']}: {best['reason']}"
+    if best["reason"] not in existing:
+        result["explanation"] = (existing + add).strip()
+
+    result["_pattern"] = best["name"]
+    return result
+
+
+# ── Ensemble fusion ───────────────────────────────────────────────────────────
+
+def _fuse(results: list) -> dict:
+    """Weight-average available LLM results with heuristic floor."""
+    if not results:
+        return {}
+
+    # Average numeric fields
+    def avg(field, default=0):
+        vals = [r.get(field, default) for r in results if r.get(field) is not None]
+        return int(sum(vals) / len(vals)) if vals else default
+
+    risk = avg("risk_score")
+    ai_prob = avg("ai_generated_probability")
+
+    # Majority vote on booleans/categoricals
+    emo_votes = sum(1 for r in results if r.get("emotional_manipulation"))
+    emotional = emo_votes >= (len(results) + 1) // 2
+
+    # scam_type: pick the most-severe non-Safe label
+    severity_rank = {"Phishing": 5, "Job Scam": 4, "Financial Fraud": 3, "Misinformation": 2, "AI Generated": 1, "Safe": 0}
+    scam_types = [r.get("scam_type", "Safe") for r in results]
+    scam_type = max(scam_types, key=lambda s: severity_rank.get(s, 0))
+
+    # Merge phrases (deduped, preserve order)
+    seen, phrases = set(), []
+    for r in results:
+        for p in r.get("suspicious_phrases", []) or []:
+            key = p.lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                phrases.append(p)
+
+    # Prefer the longest, most informative explanation
+    explanations_pool = [r.get("explanation", "") for r in results if r.get("explanation")]
+    explanation = max(explanations_pool, key=len) if explanations_pool else ""
+
+    # Merge tips (deduped)
+    seen_t, tips = set(), []
+    for r in results:
+        for t in r.get("tips", []) or []:
+            if t and t not in seen_t:
+                seen_t.add(t)
+                tips.append(t)
+
+    if risk <= 30:
+        classification = "Safe"
+    elif risk <= 60:
+        classification = "Suspicious"
+    else:
+        classification = "High Risk"
+
+    return {
+        "risk_score": risk,
+        "classification": classification,
+        "scam_type": scam_type,
+        "emotional_manipulation": emotional,
+        "ai_generated_probability": ai_prob,
+        "suspicious_phrases": phrases,
+        "explanation": explanation,
+        "tips": tips,
+        "_sources": [r.get("_source", "llm") for r in results],
+    }
+
+
+# ── Highlight helper ──────────────────────────────────────────────────────────
+
+def _highlight(text: str, phrases: list) -> str:
+    out = text
+    for phrase in sorted(set(phrases), key=len, reverse=True):
+        if not phrase or len(phrase) < 2:
+            continue
+        try:
+            pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+            out = pattern.sub(lambda m: f"<mark>{m.group()}</mark>", out)
+        except re.error:
+            continue
+    return out
+
+
+# ── Main entrypoint ───────────────────────────────────────────────────────────
 
 def analyze_text(text: str) -> AnalysisResult:
-    """Analyze text using OpenAI with heuristic fallback."""
-    # Try OpenAI first
-    ai_result = _call_openai(text)
+    """Hybrid ensemble analysis: OpenAI + Claude + heuristics + contextual patterns."""
+    # 1. Always compute heuristics (cheap, deterministic)
+    heuristic = _heuristic_analyze(text)
+    heuristic["_source"] = "heuristic"
 
-    if ai_result is None:
-        ai_result = _heuristic_analyze(text)
+    # 2. Call available LLMs in parallel-friendly sequence
+    llm_results = []
+    openai_result = _call_openai(text)
+    if openai_result:
+        openai_result["_source"] = "openai"
+        llm_results.append(openai_result)
 
-    # Apply rule-based overrides for accuracy
-    ai_result = _apply_rule_overrides(text, ai_result)
+    claude_result = _call_claude(text)
+    if claude_result:
+        claude_result["_source"] = "claude"
+        llm_results.append(claude_result)
 
-    # Build highlighted text
-    phrases = ai_result.get("suspicious_phrases", [])
+    # 3. Fuse LLM results, blend with heuristic floor
+    if llm_results:
+        fused = _fuse(llm_results)
+        # Heuristic acts as a safety floor — never let LLMs drastically under-score obvious scams
+        if heuristic["risk_score"] > fused["risk_score"] + 15:
+            fused["risk_score"] = int((fused["risk_score"] + heuristic["risk_score"]) / 2)
+        # Merge heuristic phrases too
+        seen = {p.lower() for p in fused["suspicious_phrases"]}
+        for p in heuristic["suspicious_phrases"]:
+            if p.lower() not in seen:
+                fused["suspicious_phrases"].append(p)
+        result = fused
+    else:
+        result = heuristic
+        result["_sources"] = ["heuristic"]
+
+    # 4. Contextual pattern overrides (deterministic safety net)
+    result = _apply_contextual_patterns(text, result)
+
+    # 5. Re-classify based on final risk
+    risk = result.get("risk_score", 0)
+    if risk <= 30:
+        result["classification"] = "Safe"
+    elif risk <= 60:
+        result["classification"] = "Suspicious"
+    else:
+        result["classification"] = "High Risk"
+
+    # 6. Build response
+    phrases = result.get("suspicious_phrases", []) or []
     highlighted = _highlight(text, phrases)
 
-    # Map to signals format (for extension compatibility)
-    risk = ai_result.get("risk_score", 0)
-    scam_signal = min(100, risk) if ai_result.get("scam_type", "Safe") != "Safe" else max(0, risk - 20)
-    emo_signal = 70 if ai_result.get("emotional_manipulation", False) else max(0, risk - 40)
-    ai_signal = ai_result.get("ai_generated_probability", 0)
+    scam_type = result.get("scam_type", "Safe")
+    scam_signal = min(100, risk) if scam_type != "Safe" else max(0, risk - 20)
+    emo_signal = 75 if result.get("emotional_manipulation") else max(0, risk - 40)
+    ai_signal = result.get("ai_generated_probability", 0)
 
-    # Build explanations list (for extension compatibility)
+    # Rich per-phrase explanations
     explanations = []
-    for phrase in phrases:
+    for phrase in phrases[:10]:
+        category = "scam"
+        reason = "Flagged by ensemble analysis as a known scam indicator."
+        pl = phrase.lower()
+        if any(k in pl for k in URGENCY_PHRASES):
+            category = "urgency"
+            reason = "Creates artificial urgency to bypass careful judgement — classic manipulation tactic."
+        elif any(k in pl for k in INDIA_SCAM):
+            category = "india_scam"
+            reason = "Matches India-specific scam vocabulary (KYC / UPI / Aadhaar / PAN abuse)."
+        elif any(k in pl for k in AI_TEXT_MARKERS):
+            category = "ai"
+            reason = "Stylistic marker frequently produced by large language models."
+
+        severity = "high" if risk > 65 else "medium" if risk > 35 else "low"
         explanations.append({
-            "category": "scam" if ai_result.get("scam_type", "Safe") != "Safe" else "ai",
+            "category": category,
             "phrase": phrase,
-            "reason": f"Flagged by AI analysis as suspicious.",
-            "severity": "high" if risk > 60 else "medium" if risk > 30 else "low",
+            "reason": reason,
+            "severity": severity,
         })
 
-    explanation_text = ai_result.get("explanation", "")
-    tips = ai_result.get("tips", [])
-    if not tips:
-        tips = ["Stay vigilant and verify sources."]
+    summary = result.get("explanation", "") or "Analysis complete."
+    sources = result.get("_sources", ["heuristic"])
+    pattern = result.get("_pattern")
+    if len(sources) > 1 or pattern:
+        meta_parts = []
+        if len(sources) > 1:
+            meta_parts.append(f"Ensemble of {', '.join(sources)}")
+        if pattern:
+            meta_parts.append(f"contextual pattern: {pattern}")
+        summary = f"{summary}\n\n[Engine: {' • '.join(meta_parts)}]"
+
+    tips = result.get("tips") or ["Stay vigilant and verify sources."]
 
     return AnalysisResult(
-        risk_score=ai_result.get("risk_score", 0),
-        classification=ai_result.get("classification", "Safe"),
-        scam_type=ai_result.get("scam_type", "Safe"),
-        emotional_manipulation=ai_result.get("emotional_manipulation", False),
+        risk_score=risk,
+        classification=result["classification"],
+        scam_type=scam_type,
+        emotional_manipulation=bool(result.get("emotional_manipulation")),
         signals={
-            "ai_generated": ai_signal,
-            "scam_keywords": scam_signal,
-            "emotional_manipulation": emo_signal,
+            "ai_generated": int(ai_signal),
+            "scam_keywords": int(scam_signal),
+            "emotional_manipulation": int(emo_signal),
         },
         suspicious_phrases=phrases,
         highlighted_text=highlighted,
         explanations=explanations,
-        summary=explanation_text,
+        summary=summary,
         tips=tips,
     )
 
 
-# ── Image analysis (kept as heuristic) ───────────────────────────────────────
+# ── Legacy lightweight image heuristic (kept for /analyze-image endpoint) ────
 
 def analyze_image(image_data: bytes, filename: str = "", content_type: str = "") -> ImageAnalysisResult:
-    """Heuristic image analysis for AI-generation detection."""
+    """Lightweight image heuristic. The richer pipeline lives in image_analyzer.py."""
     indicators = []
     score = 0
     metadata = {"filename": filename, "content_type": content_type, "size_bytes": len(image_data)}
 
-    # Check for EXIF data
-    has_exif = b"Exif" in image_data[:100]
+    has_exif = b"Exif" in image_data[:200]
     if not has_exif:
         score += 20
         indicators.append({"signal": "No EXIF metadata found", "weight": 20, "type": "suspicious"})
@@ -292,7 +600,6 @@ def analyze_image(image_data: bytes, filename: str = "", content_type: str = "")
         indicators.append({"signal": "EXIF metadata present", "weight": -10, "type": "authentic"})
         score -= 10
 
-    # Check dimensions (multiples of 64 common in AI)
     if content_type == "image/png" and len(image_data) > 24:
         try:
             w = struct.unpack(">I", image_data[16:20])[0]
@@ -305,18 +612,13 @@ def analyze_image(image_data: bytes, filename: str = "", content_type: str = "")
         except Exception:
             pass
 
-    # Byte distribution analysis
     if len(image_data) > 1000:
         sample = image_data[:5000]
-        unique_bytes = len(set(sample))
-        if unique_bytes > 250:
-            score += 10
-            indicators.append({"signal": "High byte diversity suggests AI generation", "weight": 10, "type": "suspicious"})
+        if len(set(sample)) > 250:
+            score += 8
+            indicators.append({"signal": "High byte diversity", "weight": 8, "type": "suspicious"})
 
-    # File size analysis
-    size_mb = len(image_data) / (1024 * 1024)
-    metadata["size_mb"] = round(size_mb, 2)
-
+    metadata["size_mb"] = round(len(image_data) / (1024 * 1024), 2)
     score = max(0, min(100, score))
     prob = score / 100.0
 
@@ -327,11 +629,8 @@ def analyze_image(image_data: bytes, filename: str = "", content_type: str = "")
     else:
         classification = "Likely AI-Generated"
 
-    tips = []
-    if prob > 0.3:
-        tips.append("Reverse image search to verify origin.")
-        tips.append("Check for visual artifacts like extra fingers or warped text.")
-    tips.append("AI detection is probabilistic — use as one signal among many.")
+    tips = ["Use the full Image Analysis page for deep forensic + Vision-LLM ensemble.",
+            "AI detection is probabilistic — use as one signal among many."]
 
     return ImageAnalysisResult(
         ai_generated_probability=round(prob, 3),
