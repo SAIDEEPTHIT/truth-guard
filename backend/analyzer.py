@@ -284,25 +284,101 @@ def _call_openai(text: str) -> Optional[dict]:
         return None
 
 
-def _call_claude(text: str) -> Optional[dict]:
-    client = _get_claude_client()
-    if client is None:
+def _call_gemini(text: str) -> Optional[dict]:
+    """Call Google Gemini 1.5 Flash via REST API (free tier, no SDK needed)."""
+    api_key = _gemini_key()
+    if not api_key:
         return None
     try:
-        msg = client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=900,
-            system=SYSTEM_PROMPT + "\n\nReturn ONLY raw JSON, no markdown fences.",
-            messages=[{"role": "user", "content": f"Analyse:\n\n{text[:8000]}"}],
+        url = GEMINI_URL_TMPL.format(model=GEMINI_TEXT_MODEL)
+        body = {
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": SYSTEM_PROMPT + "\n\nTEXT TO ANALYSE:\n\n" + text[:8000]}],
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 900,
+                "responseMimeType": "application/json",
+            },
+        }
+        resp = http_requests.post(
+            url, params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json=body, timeout=15,
         )
-        raw = "".join(b.text for b in msg.content if hasattr(b, "text")).strip()
-        # Strip ```json fences if Claude added them
+        if resp.status_code != 200:
+            logger.warning("Gemini text returned %d: %s", resp.status_code, resp.text[:200])
+            return None
+        data = resp.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        raw = "".join(p.get("text", "") for p in parts).strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
         return json.loads(raw)
     except Exception as exc:
-        logger.warning("Claude call failed: %s", exc)
+        logger.warning("Gemini text call failed: %s", exc)
         return None
+
+
+# ── Stylometric AI-text detector ─────────────────────────────────────────────
+
+def _stylometric_ai_score(text: str) -> int:
+    """Detect AI-generated text via writing-style fingerprints.
+
+    Real human text: variable sentence lengths, contractions, typos, fragments.
+    AI text: uniform sentence lengths, em-dashes, no contractions, balanced clauses.
+    """
+    if len(text) < 80:
+        return 0
+
+    score = 0
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) < 3:
+        return 0
+
+    # 1. Sentence-length uniformity (AI tends to be very even)
+    lengths = [len(s.split()) for s in sentences]
+    if len(lengths) >= 4:
+        try:
+            stdev = statistics.stdev(lengths)
+            mean_len = statistics.mean(lengths)
+            cv = stdev / mean_len if mean_len > 0 else 0
+            if cv < 0.35 and mean_len > 12:
+                score += 25  # very uniform = AI-like
+            elif cv < 0.55:
+                score += 10
+        except statistics.StatisticsError:
+            pass
+
+    # 2. Em-dash density (AI loves em-dashes)
+    em_dashes = text.count("—") + text.count(" - ")
+    em_density = em_dashes / max(1, len(sentences))
+    if em_density > 0.5:
+        score += 20
+    elif em_density > 0.25:
+        score += 10
+
+    # 3. Contraction ratio (humans use them, AI often doesn't)
+    word_count = max(1, len(text.split()))
+    contractions = len(re.findall(r"\b\w+'(?:s|t|re|ve|ll|d|m)\b", text, re.IGNORECASE))
+    contraction_ratio = contractions / word_count
+    if word_count > 100 and contraction_ratio < 0.005:
+        score += 15
+
+    # 4. Parallel "X, Y, and Z" enumerations (AI signature)
+    triplets = len(re.findall(r"\b\w+,\s+\w+,\s+and\s+\w+", text))
+    if triplets >= 2:
+        score += 15
+
+    # 5. Buzzword density
+    buzz_hits = sum(1 for m in AI_TEXT_MARKERS if m in text.lower())
+    score += min(30, buzz_hits * 8)
+
+    return min(100, score)
 
 
 # ── Heuristic engine ──────────────────────────────────────────────────────────
