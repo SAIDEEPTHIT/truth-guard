@@ -132,42 +132,58 @@ def call_openai_vision(image_bytes: bytes) -> dict:
         return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "gpt-4o-mini"}
 
 
-def call_claude_vision(image_bytes: bytes) -> dict:
-    """Ask Claude to score AI-generation likelihood."""
-    client = _get_claude_vision()
-    if client is None:
+def call_gemini_vision(image_bytes: bytes) -> dict:
+    """Ask Google Gemini 1.5 Flash (FREE tier) to score AI-generation likelihood."""
+    api_key = _gemini_key()
+    if not api_key:
         return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "", "model": "none"}
     try:
         small, mime = _shrink_for_vision(image_bytes)
         b64 = base64.b64encode(small).decode("ascii")
-        msg = client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=500,
-            system=VISION_PROMPT + "\n\nReturn raw JSON only — no markdown fences.",
-            messages=[{
+        url = GEMINI_VISION_URL_TMPL.format(model=GEMINI_VISION_MODEL)
+        body = {
+            "contents": [{
                 "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
-                    {"type": "text", "text": "Analyse this image."},
+                "parts": [
+                    {"text": VISION_PROMPT},
+                    {"inline_data": {"mime_type": mime, "data": b64}},
                 ],
             }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 600,
+                "responseMimeType": "application/json",
+            },
+        }
+        resp = http_requests.post(
+            url, params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json=body, timeout=20,
         )
-        raw = "".join(b.text for b in msg.content if hasattr(b, "text")).strip()
+        if resp.status_code != 200:
+            logger.warning("Gemini vision returned %d: %s", resp.status_code, resp.text[:200])
+            return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": resp.text[:200], "model": GEMINI_VISION_MODEL}
+        out = resp.json()
+        candidates = out.get("candidates") or []
+        if not candidates:
+            return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "no candidates", "model": GEMINI_VISION_MODEL}
+        parts = candidates[0].get("content", {}).get("parts", [])
+        raw = "".join(p.get("text", "") for p in parts).strip()
         if raw.startswith("```"):
             import re as _re
             raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=_re.IGNORECASE).strip()
         data = json.loads(raw)
         return {
             "available": True,
-            "model": "claude-3-5-haiku",
+            "model": "gemini-1.5-flash",
             "ai_score": int(data.get("ai_score", 0)),
             "verdict": data.get("verdict", "unknown"),
             "indicators": data.get("indicators", []) or [],
             "reasoning": data.get("reasoning", "") or "",
         }
     except Exception as exc:
-        logger.warning("Claude Vision error: %s", exc)
-        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "claude-3-5-haiku"}
+        logger.warning("Gemini Vision error: %s", exc)
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "gemini-1.5-flash"}
 
 
 # ── 1. EXIF Metadata Extraction ──────────────────────────────────────────────
