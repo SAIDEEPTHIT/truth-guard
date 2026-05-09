@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 # ── Lazy Vision LLM clients ──────────────────────────────────────────────────
 
 _openai_vision_client = None
-_claude_vision_client = None
+
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-1.5-flash-latest")
+GEMINI_VISION_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def _get_openai_vision():
@@ -52,20 +54,8 @@ def _get_openai_vision():
         return None
 
 
-def _get_claude_vision():
-    global _claude_vision_client
-    if _claude_vision_client is not None:
-        return _claude_vision_client
-    api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-    try:
-        import anthropic
-        _claude_vision_client = anthropic.Anthropic(api_key=api_key, timeout=20.0)
-        return _claude_vision_client
-    except Exception as exc:
-        logger.warning("Claude Vision init failed: %s", exc)
-        return None
+def _gemini_key() -> Optional[str]:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 VISION_PROMPT = """You are a forensic image analyst. Decide if this image is AI-generated (Stable Diffusion / Midjourney / DALL-E / Flux / Sora) or a real photograph / human-made artwork.
