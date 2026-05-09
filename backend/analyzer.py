@@ -138,6 +138,12 @@ AI_TEXT_MARKERS = [
     "delve into", "tapestry", "navigate the complexities", "in today's",
     "leveraging", "synergy", "robust", "seamlessly", "comprehensive overview",
     "it's worth noting", "as an ai", "i don't have personal",
+    "it is worth mentioning", "in summary", "to summarize", "additionally",
+    "embark on", "realm of", "landscape of", "a testament to", "underscore",
+    "pivotal", "nuanced", "multifaceted", "paramount", "intricate",
+    "harness the power", "unlock the potential", "in the modern era",
+    "ever-evolving", "ever-changing", "cutting-edge", "game-changer",
+    "at the end of the day", "when it comes to", "with that being said",
 ]
 
 # ── Contextual pattern combinations (very high confidence scams) ──────────────
