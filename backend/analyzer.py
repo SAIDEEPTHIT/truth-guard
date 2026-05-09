@@ -1,18 +1,19 @@
-"""TruthShield – Hybrid Multi-Model Text Analysis Engine v7.0
+"""TruthShield – Hybrid Multi-Model Text Analysis Engine v8.0
 
 Ensemble of:
   1. OpenAI GPT-4o-mini  (semantic + contextual reasoning)
-  2. Anthropic Claude    (secondary reasoning + manipulation analysis)
+  2. Google Gemini 1.5 Flash (FREE tier — secondary reasoning + manipulation analysis)
   3. Local rule engine   (deterministic guarantees, India-specific scams)
+  4. Stylometric AI-text detector (sentence-length variance, em-dash density, etc.)
 
 Auto-detects available APIs. Gracefully degrades:
-  - All 3 available  → full ensemble (best accuracy)
+  - All available    → full ensemble (best accuracy)
   - 1-2 LLMs down    → remaining LLM + heuristics
   - All LLMs down    → pure heuristic engine (still useful)
 
 Environment variables (any subset works):
   OPENAI_API_KEY     – https://platform.openai.com/api-keys
-  CLAUDE_API_KEY     – https://console.anthropic.com/
+  GEMINI_API_KEY     – https://aistudio.google.com/apikey  (FREE)
 """
 
 from __future__ import annotations
@@ -21,8 +22,11 @@ import os
 import json
 import struct
 import logging
+import statistics
 from dataclasses import dataclass, field
 from typing import Optional
+
+import requests as http_requests
 
 try:
     from dotenv import load_dotenv
@@ -35,7 +39,9 @@ logger = logging.getLogger(__name__)
 # ── Lazy LLM clients ──────────────────────────────────────────────────────────
 
 _openai_client = None
-_claude_client = None
+
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-1.5-flash-latest")
+GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def _get_openai_client():
@@ -54,20 +60,8 @@ def _get_openai_client():
         return None
 
 
-def _get_claude_client():
-    global _claude_client
-    if _claude_client is not None:
-        return _claude_client
-    api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-    try:
-        import anthropic
-        _claude_client = anthropic.Anthropic(api_key=api_key, timeout=15.0)
-        return _claude_client
-    except Exception as exc:
-        logger.warning("Anthropic init failed (install `anthropic`): %s", exc)
-        return None
+def _gemini_key() -> Optional[str]:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -144,6 +138,12 @@ AI_TEXT_MARKERS = [
     "delve into", "tapestry", "navigate the complexities", "in today's",
     "leveraging", "synergy", "robust", "seamlessly", "comprehensive overview",
     "it's worth noting", "as an ai", "i don't have personal",
+    "it is worth mentioning", "in summary", "to summarize", "additionally",
+    "embark on", "realm of", "landscape of", "a testament to", "underscore",
+    "pivotal", "nuanced", "multifaceted", "paramount", "intricate",
+    "harness the power", "unlock the potential", "in the modern era",
+    "ever-evolving", "ever-changing", "cutting-edge", "game-changer",
+    "at the end of the day", "when it comes to", "with that being said",
 ]
 
 # ── Contextual pattern combinations (very high confidence scams) ──────────────
@@ -284,25 +284,101 @@ def _call_openai(text: str) -> Optional[dict]:
         return None
 
 
-def _call_claude(text: str) -> Optional[dict]:
-    client = _get_claude_client()
-    if client is None:
+def _call_gemini(text: str) -> Optional[dict]:
+    """Call Google Gemini 1.5 Flash via REST API (free tier, no SDK needed)."""
+    api_key = _gemini_key()
+    if not api_key:
         return None
     try:
-        msg = client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=900,
-            system=SYSTEM_PROMPT + "\n\nReturn ONLY raw JSON, no markdown fences.",
-            messages=[{"role": "user", "content": f"Analyse:\n\n{text[:8000]}"}],
+        url = GEMINI_URL_TMPL.format(model=GEMINI_TEXT_MODEL)
+        body = {
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": SYSTEM_PROMPT + "\n\nTEXT TO ANALYSE:\n\n" + text[:8000]}],
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 900,
+                "responseMimeType": "application/json",
+            },
+        }
+        resp = http_requests.post(
+            url, params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json=body, timeout=15,
         )
-        raw = "".join(b.text for b in msg.content if hasattr(b, "text")).strip()
-        # Strip ```json fences if Claude added them
+        if resp.status_code != 200:
+            logger.warning("Gemini text returned %d: %s", resp.status_code, resp.text[:200])
+            return None
+        data = resp.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        raw = "".join(p.get("text", "") for p in parts).strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
         return json.loads(raw)
     except Exception as exc:
-        logger.warning("Claude call failed: %s", exc)
+        logger.warning("Gemini text call failed: %s", exc)
         return None
+
+
+# ── Stylometric AI-text detector ─────────────────────────────────────────────
+
+def _stylometric_ai_score(text: str) -> int:
+    """Detect AI-generated text via writing-style fingerprints.
+
+    Real human text: variable sentence lengths, contractions, typos, fragments.
+    AI text: uniform sentence lengths, em-dashes, no contractions, balanced clauses.
+    """
+    if len(text) < 80:
+        return 0
+
+    score = 0
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) < 3:
+        return 0
+
+    # 1. Sentence-length uniformity (AI tends to be very even)
+    lengths = [len(s.split()) for s in sentences]
+    if len(lengths) >= 4:
+        try:
+            stdev = statistics.stdev(lengths)
+            mean_len = statistics.mean(lengths)
+            cv = stdev / mean_len if mean_len > 0 else 0
+            if cv < 0.35 and mean_len > 12:
+                score += 25  # very uniform = AI-like
+            elif cv < 0.55:
+                score += 10
+        except statistics.StatisticsError:
+            pass
+
+    # 2. Em-dash density (AI loves em-dashes)
+    em_dashes = text.count("—") + text.count(" - ")
+    em_density = em_dashes / max(1, len(sentences))
+    if em_density > 0.5:
+        score += 20
+    elif em_density > 0.25:
+        score += 10
+
+    # 3. Contraction ratio (humans use them, AI often doesn't)
+    word_count = max(1, len(text.split()))
+    contractions = len(re.findall(r"\b\w+'(?:s|t|re|ve|ll|d|m)\b", text, re.IGNORECASE))
+    contraction_ratio = contractions / word_count
+    if word_count > 100 and contraction_ratio < 0.005:
+        score += 15
+
+    # 4. Parallel "X, Y, and Z" enumerations (AI signature)
+    triplets = len(re.findall(r"\b\w+,\s+\w+,\s+and\s+\w+", text))
+    if triplets >= 2:
+        score += 15
+
+    # 5. Buzzword density
+    buzz_hits = sum(1 for m in AI_TEXT_MARKERS if m in text.lower())
+    score += min(30, buzz_hits * 8)
+
+    return min(100, score)
 
 
 # ── Heuristic engine ──────────────────────────────────────────────────────────
@@ -475,30 +551,31 @@ def _highlight(text: str, phrases: list) -> str:
 # ── Main entrypoint ───────────────────────────────────────────────────────────
 
 def analyze_text(text: str) -> AnalysisResult:
-    """Hybrid ensemble analysis: OpenAI + Claude + heuristics + contextual patterns."""
+    """Hybrid ensemble analysis: OpenAI + Gemini + heuristics + stylometry + contextual patterns."""
     # 1. Always compute heuristics (cheap, deterministic)
     heuristic = _heuristic_analyze(text)
     heuristic["_source"] = "heuristic"
 
-    # 2. Call available LLMs in parallel-friendly sequence
+    # 1b. Stylometric AI-text fingerprint (independent signal)
+    stylo_ai = _stylometric_ai_score(text)
+
+    # 2. Call available LLMs
     llm_results = []
     openai_result = _call_openai(text)
     if openai_result:
         openai_result["_source"] = "openai"
         llm_results.append(openai_result)
 
-    claude_result = _call_claude(text)
-    if claude_result:
-        claude_result["_source"] = "claude"
-        llm_results.append(claude_result)
+    gemini_result = _call_gemini(text)
+    if gemini_result:
+        gemini_result["_source"] = "gemini"
+        llm_results.append(gemini_result)
 
     # 3. Fuse LLM results, blend with heuristic floor
     if llm_results:
         fused = _fuse(llm_results)
-        # Heuristic acts as a safety floor — never let LLMs drastically under-score obvious scams
         if heuristic["risk_score"] > fused["risk_score"] + 15:
             fused["risk_score"] = int((fused["risk_score"] + heuristic["risk_score"]) / 2)
-        # Merge heuristic phrases too
         seen = {p.lower() for p in fused["suspicious_phrases"]}
         for p in heuristic["suspicious_phrases"]:
             if p.lower() not in seen:
@@ -507,6 +584,15 @@ def analyze_text(text: str) -> AnalysisResult:
     else:
         result = heuristic
         result["_sources"] = ["heuristic"]
+
+    # 3b. Boost AI-generated probability with stylometric signal
+    llm_ai = result.get("ai_generated_probability", 0) or 0
+    # Take the max of (LLM estimate, stylometric estimate, heuristic estimate)
+    fused_ai = max(int(llm_ai), int(stylo_ai), int(heuristic.get("ai_generated_probability", 0)))
+    # If both LLM and stylometric agree highly, anchor a strong floor
+    if llm_ai >= 50 and stylo_ai >= 50:
+        fused_ai = max(fused_ai, int((llm_ai + stylo_ai) / 2) + 5)
+    result["ai_generated_probability"] = min(100, fused_ai)
 
     # 4. Contextual pattern overrides (deterministic safety net)
     result = _apply_contextual_patterns(text, result)

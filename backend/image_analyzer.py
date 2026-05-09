@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 # ── Lazy Vision LLM clients ──────────────────────────────────────────────────
 
 _openai_vision_client = None
-_claude_vision_client = None
+
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-1.5-flash-latest")
+GEMINI_VISION_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def _get_openai_vision():
@@ -52,20 +54,8 @@ def _get_openai_vision():
         return None
 
 
-def _get_claude_vision():
-    global _claude_vision_client
-    if _claude_vision_client is not None:
-        return _claude_vision_client
-    api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-    try:
-        import anthropic
-        _claude_vision_client = anthropic.Anthropic(api_key=api_key, timeout=20.0)
-        return _claude_vision_client
-    except Exception as exc:
-        logger.warning("Claude Vision init failed: %s", exc)
-        return None
+def _gemini_key() -> Optional[str]:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 VISION_PROMPT = """You are a forensic image analyst. Decide if this image is AI-generated (Stable Diffusion / Midjourney / DALL-E / Flux / Sora) or a real photograph / human-made artwork.
@@ -142,42 +132,58 @@ def call_openai_vision(image_bytes: bytes) -> dict:
         return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "gpt-4o-mini"}
 
 
-def call_claude_vision(image_bytes: bytes) -> dict:
-    """Ask Claude to score AI-generation likelihood."""
-    client = _get_claude_vision()
-    if client is None:
+def call_gemini_vision(image_bytes: bytes) -> dict:
+    """Ask Google Gemini 1.5 Flash (FREE tier) to score AI-generation likelihood."""
+    api_key = _gemini_key()
+    if not api_key:
         return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "", "model": "none"}
     try:
         small, mime = _shrink_for_vision(image_bytes)
         b64 = base64.b64encode(small).decode("ascii")
-        msg = client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=500,
-            system=VISION_PROMPT + "\n\nReturn raw JSON only — no markdown fences.",
-            messages=[{
+        url = GEMINI_VISION_URL_TMPL.format(model=GEMINI_VISION_MODEL)
+        body = {
+            "contents": [{
                 "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
-                    {"type": "text", "text": "Analyse this image."},
+                "parts": [
+                    {"text": VISION_PROMPT},
+                    {"inline_data": {"mime_type": mime, "data": b64}},
                 ],
             }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 600,
+                "responseMimeType": "application/json",
+            },
+        }
+        resp = http_requests.post(
+            url, params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json=body, timeout=20,
         )
-        raw = "".join(b.text for b in msg.content if hasattr(b, "text")).strip()
+        if resp.status_code != 200:
+            logger.warning("Gemini vision returned %d: %s", resp.status_code, resp.text[:200])
+            return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": resp.text[:200], "model": GEMINI_VISION_MODEL}
+        out = resp.json()
+        candidates = out.get("candidates") or []
+        if not candidates:
+            return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "no candidates", "model": GEMINI_VISION_MODEL}
+        parts = candidates[0].get("content", {}).get("parts", [])
+        raw = "".join(p.get("text", "") for p in parts).strip()
         if raw.startswith("```"):
             import re as _re
             raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=_re.IGNORECASE).strip()
         data = json.loads(raw)
         return {
             "available": True,
-            "model": "claude-3-5-haiku",
+            "model": "gemini-1.5-flash",
             "ai_score": int(data.get("ai_score", 0)),
             "verdict": data.get("verdict", "unknown"),
             "indicators": data.get("indicators", []) or [],
             "reasoning": data.get("reasoning", "") or "",
         }
     except Exception as exc:
-        logger.warning("Claude Vision error: %s", exc)
-        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "claude-3-5-haiku"}
+        logger.warning("Gemini Vision error: %s", exc)
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "gemini-1.5-flash"}
 
 
 # ── 1. EXIF Metadata Extraction ──────────────────────────────────────────────
@@ -604,8 +610,10 @@ def analyze_pixel_patterns(image_bytes: bytes) -> dict:
 # ── 4. HuggingFace API Call ──────────────────────────────────────────────────
 
 HUGGINGFACE_MODELS = [
-    "umm-maybe/AI-image-detector",
     "Organika/sdxl-detector",
+    "umm-maybe/AI-image-detector",
+    "Nahrawy/AIorNot",
+    "haywoodsloan/ai-image-detector-deploy",
 ]
 
 def call_huggingface_api(image_bytes: bytes) -> dict:
@@ -760,15 +768,15 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
     hf_result = call_huggingface_api(image_bytes)
     hf_score = hf_result.get("aiGenerationScore", 0)
 
-    # Step 4: Vision LLM ensemble
+    # Step 4: Vision LLM ensemble (OpenAI GPT-4o-mini + FREE Gemini 1.5 Flash)
     openai_vision = call_openai_vision(image_bytes)
-    claude_vision = call_claude_vision(image_bytes)
+    gemini_vision = call_gemini_vision(image_bytes)
 
     vision_results = []
     if openai_vision.get("available"):
         vision_results.append(openai_vision)
-    if claude_vision.get("available"):
-        vision_results.append(claude_vision)
+    if gemini_vision.get("available"):
+        vision_results.append(gemini_vision)
 
     vision_score = (
         sum(v["ai_score"] for v in vision_results) // len(vision_results)
@@ -893,7 +901,7 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
             "available": vision_available,
             "ensembleScore": vision_score,
             "openai": openai_vision,
-            "claude": claude_vision,
+            "gemini": gemini_vision,
             "reasoning": why_flagged,
         },
         "whyFlagged": why_flagged,
