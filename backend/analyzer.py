@@ -551,30 +551,31 @@ def _highlight(text: str, phrases: list) -> str:
 # ── Main entrypoint ───────────────────────────────────────────────────────────
 
 def analyze_text(text: str) -> AnalysisResult:
-    """Hybrid ensemble analysis: OpenAI + Claude + heuristics + contextual patterns."""
+    """Hybrid ensemble analysis: OpenAI + Gemini + heuristics + stylometry + contextual patterns."""
     # 1. Always compute heuristics (cheap, deterministic)
     heuristic = _heuristic_analyze(text)
     heuristic["_source"] = "heuristic"
 
-    # 2. Call available LLMs in parallel-friendly sequence
+    # 1b. Stylometric AI-text fingerprint (independent signal)
+    stylo_ai = _stylometric_ai_score(text)
+
+    # 2. Call available LLMs
     llm_results = []
     openai_result = _call_openai(text)
     if openai_result:
         openai_result["_source"] = "openai"
         llm_results.append(openai_result)
 
-    claude_result = _call_claude(text)
-    if claude_result:
-        claude_result["_source"] = "claude"
-        llm_results.append(claude_result)
+    gemini_result = _call_gemini(text)
+    if gemini_result:
+        gemini_result["_source"] = "gemini"
+        llm_results.append(gemini_result)
 
     # 3. Fuse LLM results, blend with heuristic floor
     if llm_results:
         fused = _fuse(llm_results)
-        # Heuristic acts as a safety floor — never let LLMs drastically under-score obvious scams
         if heuristic["risk_score"] > fused["risk_score"] + 15:
             fused["risk_score"] = int((fused["risk_score"] + heuristic["risk_score"]) / 2)
-        # Merge heuristic phrases too
         seen = {p.lower() for p in fused["suspicious_phrases"]}
         for p in heuristic["suspicious_phrases"]:
             if p.lower() not in seen:
@@ -583,6 +584,15 @@ def analyze_text(text: str) -> AnalysisResult:
     else:
         result = heuristic
         result["_sources"] = ["heuristic"]
+
+    # 3b. Boost AI-generated probability with stylometric signal
+    llm_ai = result.get("ai_generated_probability", 0) or 0
+    # Take the max of (LLM estimate, stylometric estimate, heuristic estimate)
+    fused_ai = max(int(llm_ai), int(stylo_ai), int(heuristic.get("ai_generated_probability", 0)))
+    # If both LLM and stylometric agree highly, anchor a strong floor
+    if llm_ai >= 50 and stylo_ai >= 50:
+        fused_ai = max(fused_ai, int((llm_ai + stylo_ai) / 2) + 5)
+    result["ai_generated_probability"] = min(100, fused_ai)
 
     # 4. Contextual pattern overrides (deterministic safety net)
     result = _apply_contextual_patterns(text, result)
