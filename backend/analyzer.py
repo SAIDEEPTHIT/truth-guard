@@ -1,18 +1,19 @@
-"""TruthShield – Hybrid Multi-Model Text Analysis Engine v7.0
+"""TruthShield – Hybrid Multi-Model Text Analysis Engine v8.0
 
 Ensemble of:
   1. OpenAI GPT-4o-mini  (semantic + contextual reasoning)
-  2. Anthropic Claude    (secondary reasoning + manipulation analysis)
+  2. Google Gemini 1.5 Flash (FREE tier — secondary reasoning + manipulation analysis)
   3. Local rule engine   (deterministic guarantees, India-specific scams)
+  4. Stylometric AI-text detector (sentence-length variance, em-dash density, etc.)
 
 Auto-detects available APIs. Gracefully degrades:
-  - All 3 available  → full ensemble (best accuracy)
+  - All available    → full ensemble (best accuracy)
   - 1-2 LLMs down    → remaining LLM + heuristics
   - All LLMs down    → pure heuristic engine (still useful)
 
 Environment variables (any subset works):
   OPENAI_API_KEY     – https://platform.openai.com/api-keys
-  CLAUDE_API_KEY     – https://console.anthropic.com/
+  GEMINI_API_KEY     – https://aistudio.google.com/apikey  (FREE)
 """
 
 from __future__ import annotations
@@ -21,8 +22,11 @@ import os
 import json
 import struct
 import logging
+import statistics
 from dataclasses import dataclass, field
 from typing import Optional
+
+import requests as http_requests
 
 try:
     from dotenv import load_dotenv
@@ -35,7 +39,9 @@ logger = logging.getLogger(__name__)
 # ── Lazy LLM clients ──────────────────────────────────────────────────────────
 
 _openai_client = None
-_claude_client = None
+
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-1.5-flash-latest")
+GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def _get_openai_client():
@@ -54,20 +60,8 @@ def _get_openai_client():
         return None
 
 
-def _get_claude_client():
-    global _claude_client
-    if _claude_client is not None:
-        return _claude_client
-    api_key = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-    try:
-        import anthropic
-        _claude_client = anthropic.Anthropic(api_key=api_key, timeout=15.0)
-        return _claude_client
-    except Exception as exc:
-        logger.warning("Anthropic init failed (install `anthropic`): %s", exc)
-        return None
+def _gemini_key() -> Optional[str]:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
