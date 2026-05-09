@@ -899,7 +899,7 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
             "available": vision_available,
             "ensembleScore": vision_score,
             "openai": openai_vision,
-            "claude": claude_vision,
+            "gemini": gemini_vision,
             "reasoning": why_flagged,
         },
         "whyFlagged": why_flagged,
