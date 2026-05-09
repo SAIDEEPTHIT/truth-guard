@@ -766,15 +766,15 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
     hf_result = call_huggingface_api(image_bytes)
     hf_score = hf_result.get("aiGenerationScore", 0)
 
-    # Step 4: Vision LLM ensemble
+    # Step 4: Vision LLM ensemble (OpenAI GPT-4o-mini + FREE Gemini 1.5 Flash)
     openai_vision = call_openai_vision(image_bytes)
-    claude_vision = call_claude_vision(image_bytes)
+    gemini_vision = call_gemini_vision(image_bytes)
 
     vision_results = []
     if openai_vision.get("available"):
         vision_results.append(openai_vision)
-    if claude_vision.get("available"):
-        vision_results.append(claude_vision)
+    if gemini_vision.get("available"):
+        vision_results.append(gemini_vision)
 
     vision_score = (
         sum(v["ai_score"] for v in vision_results) // len(vision_results)
