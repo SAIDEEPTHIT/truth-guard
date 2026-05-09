@@ -610,8 +610,10 @@ def analyze_pixel_patterns(image_bytes: bytes) -> dict:
 # ── 4. HuggingFace API Call ──────────────────────────────────────────────────
 
 HUGGINGFACE_MODELS = [
-    "umm-maybe/AI-image-detector",
     "Organika/sdxl-detector",
+    "umm-maybe/AI-image-detector",
+    "Nahrawy/AIorNot",
+    "haywoodsloan/ai-image-detector-deploy",
 ]
 
 def call_huggingface_api(image_bytes: bytes) -> dict:
