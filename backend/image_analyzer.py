@@ -768,7 +768,7 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
       • Pixel forensics         — noise / gradient / pattern signatures
       • HuggingFace classifier  — pretrained AI-detection model
       • OpenAI Vision           — semantic realism reasoning
-      • Claude Vision           — artefact reasoning
+      • Gemini Vision           — artefact reasoning
     """
 
     # Step 1: Metadata
@@ -812,7 +812,9 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
     elif hf_result.get("available"):
         weights = {"metadata": 0.20, "pixel": 0.35, "hf": 0.45, "vision": 0.0}
     else:
-        weights = {"metadata": 0.35, "pixel": 0.65, "hf": 0.0, "vision": 0.0}
+        # Offline fallback: pixel forensics alone often under-scores polished AI
+        # portraits, so metadata must carry more weight when all APIs fail.
+        weights = {"metadata": 0.65, "pixel": 0.35, "hf": 0.0, "vision": 0.0}
 
     final_score = int(
         metadata_score * weights["metadata"]
@@ -829,6 +831,32 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
             final_score = max(final_score, avg_v - 5)
         elif agree and avg_v <= 20:
             final_score = min(final_score, avg_v + 10)
+
+    red_flags = []
+    if metadata.get("hasMissingEXIF"):
+        red_flags.append("missing_exif")
+    w = metadata.get("width")
+    h = metadata.get("height")
+    ai_dims = [(512,512),(768,768),(1024,1024),(1024,768),(768,1024),(2048,2048),(1536,1536),(896,1152),(1152,896),(1792,1024),(1024,1792)]
+    if w and h and ((w, h) in ai_dims or (w % 64 == 0 and h % 64 == 0 and w >= 512 and h >= 512)):
+        red_flags.append("ai_dimensions")
+    if pixel_analysis.get("noiseDistribution") == "suspicious":
+        red_flags.append("noise_anomaly")
+    if pixel_analysis.get("colorGradients") in ["unusual", "suspicious"]:
+        red_flags.append("gradient_anomaly")
+    if hf_score >= 60:
+        red_flags.append("hf_ai")
+    if vision_score >= 60:
+        red_flags.append("vision_ai")
+
+    # Deterministic safety floor: obvious generator clues should never be shown
+    # as “Likely Authentic” just because external APIs are down or quota-limited.
+    if {"missing_exif", "ai_dimensions"}.issubset(set(red_flags)):
+        final_score = max(final_score, 45)
+    if len(red_flags) >= 3:
+        final_score = max(final_score, 62)
+    if vision_score >= 75 or hf_score >= 75:
+        final_score = max(final_score, max(vision_score, hf_score) - 5)
 
     final_score = max(0, min(100, final_score))
 
