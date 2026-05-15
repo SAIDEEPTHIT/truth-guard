@@ -34,8 +34,19 @@ logger = logging.getLogger(__name__)
 
 _openai_vision_client = None
 
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-1.5-flash-latest")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.0-flash")
 GEMINI_VISION_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+def _gemini_model_candidates() -> list[str]:
+    """Try current Gemini model names first, then legacy fallbacks.
+
+    Render was returning 404 for `gemini-1.5-flash-latest`, so this avoids
+    silently disabling vision analysis when one alias is unavailable.
+    """
+    candidates = [GEMINI_VISION_MODEL, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    seen = set()
+    return [m for m in candidates if m and not (m in seen or seen.add(m))]
 
 
 def _get_openai_vision():
@@ -137,53 +148,58 @@ def call_gemini_vision(image_bytes: bytes) -> dict:
     api_key = _gemini_key()
     if not api_key:
         return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "", "model": "none"}
+    last_error = ""
     try:
         small, mime = _shrink_for_vision(image_bytes)
         b64 = base64.b64encode(small).decode("ascii")
-        url = GEMINI_VISION_URL_TMPL.format(model=GEMINI_VISION_MODEL)
-        body = {
-            "contents": [{
-                "role": "user",
-                "parts": [
-                    {"text": VISION_PROMPT},
-                    {"inline_data": {"mime_type": mime, "data": b64}},
-                ],
-            }],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 600,
-                "responseMimeType": "application/json",
-            },
-        }
-        resp = http_requests.post(
-            url, params={"key": api_key},
-            headers={"Content-Type": "application/json"},
-            json=body, timeout=20,
-        )
-        if resp.status_code != 200:
-            logger.warning("Gemini vision returned %d: %s", resp.status_code, resp.text[:200])
-            return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": resp.text[:200], "model": GEMINI_VISION_MODEL}
-        out = resp.json()
-        candidates = out.get("candidates") or []
-        if not candidates:
-            return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": "no candidates", "model": GEMINI_VISION_MODEL}
-        parts = candidates[0].get("content", {}).get("parts", [])
-        raw = "".join(p.get("text", "") for p in parts).strip()
-        if raw.startswith("```"):
-            import re as _re
-            raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=_re.IGNORECASE).strip()
-        data = json.loads(raw)
-        return {
-            "available": True,
-            "model": "gemini-1.5-flash",
-            "ai_score": int(data.get("ai_score", 0)),
-            "verdict": data.get("verdict", "unknown"),
-            "indicators": data.get("indicators", []) or [],
-            "reasoning": data.get("reasoning", "") or "",
-        }
+        for model_name in _gemini_model_candidates():
+            url = GEMINI_VISION_URL_TMPL.format(model=model_name)
+            body = {
+                "contents": [{
+                    "role": "user",
+                    "parts": [
+                        {"text": VISION_PROMPT},
+                        {"inline_data": {"mime_type": mime, "data": b64}},
+                    ],
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 2048,
+                    "responseMimeType": "application/json",
+                },
+            }
+            resp = http_requests.post(
+                url, params={"key": api_key},
+                headers={"Content-Type": "application/json"},
+                json=body, timeout=20,
+            )
+            if resp.status_code != 200:
+                last_error = resp.text[:200]
+                logger.warning("Gemini vision %s returned %d: %s", model_name, resp.status_code, last_error)
+                continue
+            out = resp.json()
+            candidates = out.get("candidates") or []
+            if not candidates:
+                last_error = "no candidates"
+                continue
+            parts = candidates[0].get("content", {}).get("parts", [])
+            raw = "".join(p.get("text", "") for p in parts).strip()
+            if raw.startswith("```"):
+                import re as _re
+                raw = _re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=_re.IGNORECASE).strip()
+            data = json.loads(raw)
+            return {
+                "available": True,
+                "model": model_name,
+                "ai_score": int(data.get("ai_score", 0)),
+                "verdict": data.get("verdict", "unknown"),
+                "indicators": data.get("indicators", []) or [],
+                "reasoning": data.get("reasoning", "") or "",
+            }
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": last_error or "Gemini unavailable", "model": GEMINI_VISION_MODEL}
     except Exception as exc:
         logger.warning("Gemini Vision error: %s", exc)
-        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": "gemini-1.5-flash"}
+        return {"available": False, "ai_score": 0, "verdict": "unknown", "indicators": [], "reasoning": str(exc)[:200], "model": GEMINI_VISION_MODEL}
 
 
 # ── 1. EXIF Metadata Extraction ──────────────────────────────────────────────
@@ -752,7 +768,7 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
       • Pixel forensics         — noise / gradient / pattern signatures
       • HuggingFace classifier  — pretrained AI-detection model
       • OpenAI Vision           — semantic realism reasoning
-      • Claude Vision           — artefact reasoning
+      • Gemini Vision           — artefact reasoning
     """
 
     # Step 1: Metadata
@@ -796,7 +812,9 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
     elif hf_result.get("available"):
         weights = {"metadata": 0.20, "pixel": 0.35, "hf": 0.45, "vision": 0.0}
     else:
-        weights = {"metadata": 0.35, "pixel": 0.65, "hf": 0.0, "vision": 0.0}
+        # Offline fallback: pixel forensics alone often under-scores polished AI
+        # portraits, so metadata must carry more weight when all APIs fail.
+        weights = {"metadata": 0.65, "pixel": 0.35, "hf": 0.0, "vision": 0.0}
 
     final_score = int(
         metadata_score * weights["metadata"]
@@ -813,6 +831,32 @@ def analyze_image_full(image_bytes: bytes, filename: str = "", content_type: str
             final_score = max(final_score, avg_v - 5)
         elif agree and avg_v <= 20:
             final_score = min(final_score, avg_v + 10)
+
+    red_flags = []
+    if metadata.get("hasMissingEXIF"):
+        red_flags.append("missing_exif")
+    w = metadata.get("width")
+    h = metadata.get("height")
+    ai_dims = [(512,512),(768,768),(1024,1024),(1024,768),(768,1024),(2048,2048),(1536,1536),(896,1152),(1152,896),(1792,1024),(1024,1792)]
+    if w and h and ((w, h) in ai_dims or (w % 64 == 0 and h % 64 == 0 and w >= 512 and h >= 512)):
+        red_flags.append("ai_dimensions")
+    if pixel_analysis.get("noiseDistribution") == "suspicious":
+        red_flags.append("noise_anomaly")
+    if pixel_analysis.get("colorGradients") in ["unusual", "suspicious"]:
+        red_flags.append("gradient_anomaly")
+    if hf_score >= 60:
+        red_flags.append("hf_ai")
+    if vision_score >= 60:
+        red_flags.append("vision_ai")
+
+    # Deterministic safety floor: obvious generator clues should never be shown
+    # as “Likely Authentic” just because external APIs are down or quota-limited.
+    if {"missing_exif", "ai_dimensions"}.issubset(set(red_flags)):
+        final_score = max(final_score, 45)
+    if len(red_flags) >= 3:
+        final_score = max(final_score, 62)
+    if vision_score >= 75 or hf_score >= 75:
+        final_score = max(final_score, max(vision_score, hf_score) - 5)
 
     final_score = max(0, min(100, final_score))
 

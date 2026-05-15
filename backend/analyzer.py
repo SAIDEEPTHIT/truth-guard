@@ -40,8 +40,14 @@ logger = logging.getLogger(__name__)
 
 _openai_client = None
 
-GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-1.5-flash-latest")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.0-flash")
 GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+def _gemini_text_model_candidates() -> list[str]:
+    candidates = [GEMINI_TEXT_MODEL, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    seen = set()
+    return [m for m in candidates if m and not (m in seen or seen.add(m))]
 
 
 def _get_openai_client():
@@ -290,35 +296,37 @@ def _call_gemini(text: str) -> Optional[dict]:
     if not api_key:
         return None
     try:
-        url = GEMINI_URL_TMPL.format(model=GEMINI_TEXT_MODEL)
-        body = {
-            "contents": [{
-                "role": "user",
-                "parts": [{"text": SYSTEM_PROMPT + "\n\nTEXT TO ANALYSE:\n\n" + text[:8000]}],
-            }],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 900,
-                "responseMimeType": "application/json",
-            },
-        }
-        resp = http_requests.post(
-            url, params={"key": api_key},
-            headers={"Content-Type": "application/json"},
-            json=body, timeout=15,
-        )
-        if resp.status_code != 200:
-            logger.warning("Gemini text returned %d: %s", resp.status_code, resp.text[:200])
-            return None
-        data = resp.json()
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return None
-        parts = candidates[0].get("content", {}).get("parts", [])
-        raw = "".join(p.get("text", "") for p in parts).strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
-        return json.loads(raw)
+        for model_name in _gemini_text_model_candidates():
+            url = GEMINI_URL_TMPL.format(model=model_name)
+            body = {
+                "contents": [{
+                    "role": "user",
+                    "parts": [{"text": SYSTEM_PROMPT + "\n\nTEXT TO ANALYSE:\n\n" + text[:8000]}],
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 2048,
+                    "responseMimeType": "application/json",
+                },
+            }
+            resp = http_requests.post(
+                url, params={"key": api_key},
+                headers={"Content-Type": "application/json"},
+                json=body, timeout=15,
+            )
+            if resp.status_code != 200:
+                logger.warning("Gemini text %s returned %d: %s", model_name, resp.status_code, resp.text[:200])
+                continue
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                continue
+            parts = candidates[0].get("content", {}).get("parts", [])
+            raw = "".join(p.get("text", "") for p in parts).strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE).strip()
+            return json.loads(raw)
+        return None
     except Exception as exc:
         logger.warning("Gemini text call failed: %s", exc)
         return None
