@@ -18,6 +18,11 @@ from image_analyzer import (
     get_recommendation,
     analyze_image_full,
 )
+from reverse_search import (
+    compute_dhash,
+    reverse_search as run_reverse_search,
+    add_known_image,
+)
 from blocklist import (
     add_domain,
     get_blocklist,
@@ -186,6 +191,78 @@ async def analyze_full_endpoint(file: UploadFile = File(...)):
     if len(image_data) > 20 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
     return analyze_image_full(image_data, filename=file.filename or "", content_type=file.content_type or "")
+
+
+# ── OCR + Reverse-Search Endpoints (v7) ───────────────────────────────────────
+
+class OCRAnalyzeRequest(BaseModel):
+    text: str = Field(default="", max_length=20000)
+    filename: Optional[str] = None
+
+
+@app.post("/api/image/analyze-ocr")
+def analyze_ocr_endpoint(req: OCRAnalyzeRequest):
+    """Run scam/phishing/manipulation detection on text extracted from an image.
+
+    Frontend uses tesseract.js for OCR (free, offline, no API key), then sends
+    the extracted text here so we reuse the proven analyze_text() pipeline.
+    """
+    text = (req.text or "").strip()
+    if not text:
+        return {
+            "extractedText": "",
+            "hasText": False,
+            "message": "No text found in image",
+            "riskScore": 0,
+            "classification": "No Text",
+            "scamType": "Safe",
+            "emotionalManipulation": False,
+            "signals": {"ai_generated": 0, "scam_keywords": 0, "emotional_manipulation": 0},
+            "suspiciousPhrases": [],
+            "summary": "No readable text was found in the image.",
+            "tips": ["Try a higher-resolution image if you expected text.", "Crop tightly around the text area."],
+        }
+
+    result = analyze_text(text)
+    return {
+        "extractedText": text,
+        "hasText": True,
+        "riskScore": result.risk_score,
+        "classification": result.classification,
+        "scamType": result.scam_type,
+        "emotionalManipulation": result.emotional_manipulation,
+        "signals": result.signals,
+        "suspiciousPhrases": result.suspicious_phrases,
+        "highlightedText": result.highlighted_text,
+        "summary": result.summary,
+        "tips": result.tips,
+        "explanations": result.explanations,
+    }
+
+
+@app.post("/api/image/reverse-search")
+async def reverse_search_endpoint(file: UploadFile = File(...)):
+    """Compute perceptual hash and check against TruthShield phishing-image DB."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+    return run_reverse_search(image_data)
+
+
+class SeedHashRequest(BaseModel):
+    image_hash: str = Field(..., min_length=4, max_length=64)
+    url: str = Field(default="", max_length=500)
+    title: str = Field(default="Known phishing image", max_length=200)
+    category: str = Field(default="phishing", max_length=40)
+
+
+@app.post("/api/image/reverse-search/seed")
+def reverse_search_seed(req: SeedHashRequest):
+    """Add a known phishing image hash to the local database."""
+    entry = add_known_image(req.image_hash.lower(), req.url, req.title, req.category)
+    return {"success": True, "entry": entry}
 
 
 # ── Blocklist Endpoints ───────────────────────────────────────────────────────
