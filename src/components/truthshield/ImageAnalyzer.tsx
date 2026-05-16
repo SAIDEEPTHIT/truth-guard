@@ -54,6 +54,8 @@ const ImageAnalyzer = () => {
   const [preview, setPreview] = useState<string | null>(null);
   const [localResult, setLocalResult] = useState<ImageAnalysisResult | null>(null);
   const [enhancedResult, setEnhancedResult] = useState<EnhancedResult | null>(null);
+  const [ocrResult, setOcrResult] = useState<OCRResultData>({ loading: false, hasText: false, extractedText: "" });
+  const [reverseResult, setReverseResult] = useState<ReverseSearchData>({ loading: false });
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
   const [dragOver, setDragOver] = useState(false);
@@ -66,8 +68,65 @@ const ImageAnalyzer = () => {
     setPreview(URL.createObjectURL(f));
     setLocalResult(null);
     setEnhancedResult(null);
+    setOcrResult({ loading: true, hasText: false, extractedText: "" });
+    setReverseResult({ loading: true });
     setLoading(true);
     setActiveTab("overview");
+
+    // Kick off OCR (browser-side, free) and reverse-search in parallel — they don't block UI
+    const previewUrl = URL.createObjectURL(f);
+    (async () => {
+      try {
+        const ocr = await extractTextFromImage(f);
+        if (!ocr.text) {
+          setOcrResult({ loading: false, hasText: false, extractedText: "", confidence: ocr.confidence });
+          return;
+        }
+        // Send extracted text to backend scam analyzer
+        const res = await fetch(`${API_BASE}/api/image/analyze-ocr`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: ocr.text, filename: f.name }),
+        });
+        if (res.ok) {
+          const d = await res.json();
+          setOcrResult({
+            loading: false,
+            hasText: !!d.hasText,
+            extractedText: d.extractedText || ocr.text,
+            confidence: ocr.confidence,
+            riskScore: d.riskScore,
+            classification: d.classification,
+            scamType: d.scamType,
+            emotionalManipulation: d.emotionalManipulation,
+            signals: d.signals,
+            suspiciousPhrases: d.suspiciousPhrases,
+            summary: d.summary,
+            tips: d.tips,
+          });
+        } else {
+          setOcrResult({ loading: false, hasText: true, extractedText: ocr.text, confidence: ocr.confidence, error: "Backend scam analyzer unavailable" });
+        }
+      } catch (err) {
+        setOcrResult({ loading: false, hasText: false, extractedText: "", error: String(err) });
+      }
+    })();
+
+    (async () => {
+      try {
+        const form = new FormData();
+        form.append("file", f);
+        const res = await fetch(`${API_BASE}/api/image/reverse-search`, { method: "POST", body: form });
+        if (res.ok) {
+          const d = await res.json();
+          setReverseResult({ loading: false, ...d, previewUrl });
+        } else {
+          setReverseResult({ loading: false, error: `HTTP ${res.status}`, previewUrl });
+        }
+      } catch (err) {
+        setReverseResult({ loading: false, error: String(err), previewUrl });
+      }
+    })();
 
     // Run local analysis immediately
     const localAnalysis = await analyzeImage(f);
