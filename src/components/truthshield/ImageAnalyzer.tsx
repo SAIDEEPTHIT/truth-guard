@@ -190,6 +190,8 @@ const ImageAnalyzer = () => {
     setPreview(null);
     setLocalResult(null);
     setEnhancedResult(null);
+    setOcrResult({ loading: false, hasText: false, extractedText: "" });
+    setReverseResult({ loading: false });
     setActiveTab("overview");
   };
 
