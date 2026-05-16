@@ -1,7 +1,8 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ImageIcon, Upload, Loader2, RotateCcw, ExternalLink, Scan, FileSearch, ShieldAlert, BarChart3 } from "lucide-react";
+import { ImageIcon, Upload, Loader2, RotateCcw, ExternalLink, Scan, FileSearch, ShieldAlert, BarChart3, ScanText, Search } from "lucide-react";
 import { analyzeImage, type ImageAnalysisResult } from "@/lib/analyzer";
+import { extractTextFromImage } from "@/lib/ocr";
 import { addToHistory } from "./AnalysisHistory";
 import { recordAnalysis } from "@/lib/analysisStore";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
@@ -9,6 +10,8 @@ import RiskGauge from "./RiskGauge";
 import ImageMetadataPanel from "./ImageMetadataPanel";
 import AIDetectionPanel from "./AIDetectionPanel";
 import ImageRiskIndicators from "./ImageRiskIndicators";
+import OCRAnalysisPanel, { type OCRResultData } from "./OCRAnalysisPanel";
+import ReverseImageSearchPanel, { type ReverseSearchData } from "./ReverseImageSearchPanel";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
