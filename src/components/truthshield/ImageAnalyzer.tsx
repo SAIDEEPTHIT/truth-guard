@@ -204,13 +204,12 @@ const ImageAnalyzer = () => {
         <div className="mb-8">
           <h1 className={`font-bold mb-2 ${seniorMode ? "text-3xl" : "text-2xl"}`}>
             <ImageIcon className="w-6 h-6 inline-block mr-2 text-primary" />
-            AI Image Detection
+            Image Threat Analysis
           </h1>
           <p className={`text-muted-foreground ${seniorMode ? "text-lg" : "text-sm"}`}>
             {seniorMode
-              ? "Upload a photo to check if it was made by a computer (AI)"
-              : "Advanced AI-powered image authenticity analysis with metadata, pixel patterns, and ML detection"
-            }
+              ? "Upload a photo — we read any text in it, check if it's a known scam image, and look for AI signs."
+              : "OCR scam detection + perceptual-hash reverse search + metadata, pixel & AI forensics — all in one upload."}
           </p>
         </div>
 
