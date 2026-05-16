@@ -1,7 +1,8 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ImageIcon, Upload, Loader2, RotateCcw, ExternalLink, Scan, FileSearch, ShieldAlert, BarChart3 } from "lucide-react";
+import { ImageIcon, Upload, Loader2, RotateCcw, ExternalLink, Scan, FileSearch, ShieldAlert, BarChart3, ScanText, Search } from "lucide-react";
 import { analyzeImage, type ImageAnalysisResult } from "@/lib/analyzer";
+import { extractTextFromImage } from "@/lib/ocr";
 import { addToHistory } from "./AnalysisHistory";
 import { recordAnalysis } from "@/lib/analysisStore";
 import { useSeniorMode } from "@/contexts/SeniorModeContext";
@@ -9,6 +10,8 @@ import RiskGauge from "./RiskGauge";
 import ImageMetadataPanel from "./ImageMetadataPanel";
 import AIDetectionPanel from "./AIDetectionPanel";
 import ImageRiskIndicators from "./ImageRiskIndicators";
+import OCRAnalysisPanel, { type OCRResultData } from "./OCRAnalysisPanel";
+import ReverseImageSearchPanel, { type ReverseSearchData } from "./ReverseImageSearchPanel";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -51,6 +54,8 @@ const ImageAnalyzer = () => {
   const [preview, setPreview] = useState<string | null>(null);
   const [localResult, setLocalResult] = useState<ImageAnalysisResult | null>(null);
   const [enhancedResult, setEnhancedResult] = useState<EnhancedResult | null>(null);
+  const [ocrResult, setOcrResult] = useState<OCRResultData>({ loading: false, hasText: false, extractedText: "" });
+  const [reverseResult, setReverseResult] = useState<ReverseSearchData>({ loading: false });
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
   const [dragOver, setDragOver] = useState(false);
@@ -63,8 +68,65 @@ const ImageAnalyzer = () => {
     setPreview(URL.createObjectURL(f));
     setLocalResult(null);
     setEnhancedResult(null);
+    setOcrResult({ loading: true, hasText: false, extractedText: "" });
+    setReverseResult({ loading: true });
     setLoading(true);
     setActiveTab("overview");
+
+    // Kick off OCR (browser-side, free) and reverse-search in parallel — they don't block UI
+    const previewUrl = URL.createObjectURL(f);
+    (async () => {
+      try {
+        const ocr = await extractTextFromImage(f);
+        if (!ocr.text) {
+          setOcrResult({ loading: false, hasText: false, extractedText: "", confidence: ocr.confidence });
+          return;
+        }
+        // Send extracted text to backend scam analyzer
+        const res = await fetch(`${API_BASE}/api/image/analyze-ocr`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: ocr.text, filename: f.name }),
+        });
+        if (res.ok) {
+          const d = await res.json();
+          setOcrResult({
+            loading: false,
+            hasText: !!d.hasText,
+            extractedText: d.extractedText || ocr.text,
+            confidence: ocr.confidence,
+            riskScore: d.riskScore,
+            classification: d.classification,
+            scamType: d.scamType,
+            emotionalManipulation: d.emotionalManipulation,
+            signals: d.signals,
+            suspiciousPhrases: d.suspiciousPhrases,
+            summary: d.summary,
+            tips: d.tips,
+          });
+        } else {
+          setOcrResult({ loading: false, hasText: true, extractedText: ocr.text, confidence: ocr.confidence, error: "Backend scam analyzer unavailable" });
+        }
+      } catch (err) {
+        setOcrResult({ loading: false, hasText: false, extractedText: "", error: String(err) });
+      }
+    })();
+
+    (async () => {
+      try {
+        const form = new FormData();
+        form.append("file", f);
+        const res = await fetch(`${API_BASE}/api/image/reverse-search`, { method: "POST", body: form });
+        if (res.ok) {
+          const d = await res.json();
+          setReverseResult({ loading: false, ...d, previewUrl });
+        } else {
+          setReverseResult({ loading: false, error: `HTTP ${res.status}`, previewUrl });
+        }
+      } catch (err) {
+        setReverseResult({ loading: false, error: String(err), previewUrl });
+      }
+    })();
 
     // Run local analysis immediately
     const localAnalysis = await analyzeImage(f);
@@ -128,6 +190,8 @@ const ImageAnalyzer = () => {
     setPreview(null);
     setLocalResult(null);
     setEnhancedResult(null);
+    setOcrResult({ loading: false, hasText: false, extractedText: "" });
+    setReverseResult({ loading: false });
     setActiveTab("overview");
   };
 
@@ -140,13 +204,12 @@ const ImageAnalyzer = () => {
         <div className="mb-8">
           <h1 className={`font-bold mb-2 ${seniorMode ? "text-3xl" : "text-2xl"}`}>
             <ImageIcon className="w-6 h-6 inline-block mr-2 text-primary" />
-            AI Image Detection
+            Image Threat Analysis
           </h1>
           <p className={`text-muted-foreground ${seniorMode ? "text-lg" : "text-sm"}`}>
             {seniorMode
-              ? "Upload a photo to check if it was made by a computer (AI)"
-              : "Advanced AI-powered image authenticity analysis with metadata, pixel patterns, and ML detection"
-            }
+              ? "Upload a photo — we read any text in it, check if it's a known scam image, and look for AI signs."
+              : "OCR scam detection + perceptual-hash reverse search + metadata, pixel & AI forensics — all in one upload."}
           </p>
         </div>
 
@@ -259,71 +322,88 @@ const ImageAnalyzer = () => {
                   <p className="text-muted-foreground text-sm">Analyzing image patterns...</p>
                   <p className="text-muted-foreground/60 text-xs mt-1">Running metadata, pixel, and AI detection</p>
                 </motion.div>
-              ) : enhancedResult ? (
+              ) : enhancedResult || ocrResult.loading || ocrResult.hasText || reverseResult.loading || reverseResult.imageHash ? (
                 <motion.div
                   key="enhanced"
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                 >
                   <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                    <TabsList className="grid w-full grid-cols-4 mb-4">
-                      <TabsTrigger value="overview" className="gap-1 text-xs">
+                    <TabsList className="grid w-full grid-cols-5 mb-4">
+                      <TabsTrigger value="overview" className="gap-1 text-[11px]">
                         <ShieldAlert className="w-3.5 h-3.5" />
                         {seniorMode ? "Result" : "Risk"}
                       </TabsTrigger>
-                      <TabsTrigger value="metadata" className="gap-1 text-xs">
+                      <TabsTrigger value="ocr" className="gap-1 text-[11px]">
+                        <ScanText className="w-3.5 h-3.5" />
+                        {seniorMode ? "Text" : "OCR Scan"}
+                      </TabsTrigger>
+                      <TabsTrigger value="reverse" className="gap-1 text-[11px]">
+                        <Search className="w-3.5 h-3.5" />
+                        {seniorMode ? "Search" : "Reverse"}
+                      </TabsTrigger>
+                      <TabsTrigger value="metadata" className="gap-1 text-[11px]">
                         <FileSearch className="w-3.5 h-3.5" />
-                        {seniorMode ? "Details" : "Metadata"}
+                        {seniorMode ? "Info" : "Metadata"}
                       </TabsTrigger>
-                      <TabsTrigger value="ai" className="gap-1 text-xs">
+                      <TabsTrigger value="ai" className="gap-1 text-[11px]">
                         <Scan className="w-3.5 h-3.5" />
-                        {seniorMode ? "AI Check" : "AI Detection"}
-                      </TabsTrigger>
-                      <TabsTrigger value="breakdown" className="gap-1 text-xs">
-                        <BarChart3 className="w-3.5 h-3.5" />
-                        {seniorMode ? "Score" : "Breakdown"}
+                        {seniorMode ? "AI" : "AI Check"}
                       </TabsTrigger>
                     </TabsList>
 
                     <TabsContent value="overview">
-                      <ImageRiskIndicators
-                        riskScore={enhancedResult.riskScore}
-                        classification={enhancedResult.classification}
-                        confidence={enhancedResult.confidence}
-                        flags={enhancedResult.flags}
-                        recommendation={enhancedResult.recommendation}
-                        scoreBreakdown={enhancedResult.scoreBreakdown}
-                        tips={enhancedResult.tips}
-                        fullResult={enhancedResult as unknown as Record<string, unknown>}
-                      />
+                      {enhancedResult ? (
+                        <ImageRiskIndicators
+                          riskScore={enhancedResult.riskScore}
+                          classification={enhancedResult.classification}
+                          confidence={enhancedResult.confidence}
+                          flags={enhancedResult.flags}
+                          recommendation={enhancedResult.recommendation}
+                          scoreBreakdown={enhancedResult.scoreBreakdown}
+                          tips={enhancedResult.tips}
+                          fullResult={enhancedResult as unknown as Record<string, unknown>}
+                        />
+                      ) : (
+                        <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground text-center">
+                          Running full analysis… OCR &amp; reverse-search results are ready in their tabs.
+                        </div>
+                      )}
+                    </TabsContent>
+
+                    <TabsContent value="ocr">
+                      <OCRAnalysisPanel data={ocrResult} />
+                    </TabsContent>
+
+                    <TabsContent value="reverse">
+                      <ReverseImageSearchPanel data={reverseResult} />
                     </TabsContent>
 
                     <TabsContent value="metadata">
-                      <ImageMetadataPanel
-                        metadata={enhancedResult.metadata as any}
-                        metadataScore={enhancedResult.metadataScore}
-                        indicators={enhancedResult.metadataIndicators}
-                      />
+                      {enhancedResult ? (
+                        <ImageMetadataPanel
+                          metadata={enhancedResult.metadata as any}
+                          metadataScore={enhancedResult.metadataScore}
+                          indicators={enhancedResult.metadataIndicators}
+                        />
+                      ) : (
+                        <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground text-center">
+                          Metadata analysis loading…
+                        </div>
+                      )}
                     </TabsContent>
 
                     <TabsContent value="ai">
-                      <AIDetectionPanel
-                        pixelAnalysis={enhancedResult.pixelAnalysis}
-                        aiDetection={enhancedResult.aiDetection}
-                      />
-                    </TabsContent>
-
-                    <TabsContent value="breakdown">
-                      <ImageRiskIndicators
-                        riskScore={enhancedResult.riskScore}
-                        classification={enhancedResult.classification}
-                        confidence={enhancedResult.confidence}
-                        flags={enhancedResult.flags}
-                        recommendation={enhancedResult.recommendation}
-                        scoreBreakdown={enhancedResult.scoreBreakdown}
-                        tips={enhancedResult.tips}
-                        fullResult={enhancedResult as unknown as Record<string, unknown>}
-                      />
+                      {enhancedResult ? (
+                        <AIDetectionPanel
+                          pixelAnalysis={enhancedResult.pixelAnalysis}
+                          aiDetection={enhancedResult.aiDetection}
+                        />
+                      ) : (
+                        <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground text-center">
+                          AI detection loading…
+                        </div>
+                      )}
                     </TabsContent>
                   </Tabs>
                 </motion.div>
