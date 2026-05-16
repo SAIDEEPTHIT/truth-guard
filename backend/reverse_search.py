@@ -103,7 +103,7 @@ def hamming(a: str, b: str) -> int:
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-def search_hash(image_hash: str, max_distance: int = 10) -> list[dict]:
+def search_hash(image_hash: str, max_distance: int = 6) -> list[dict]:
     """Return DB entries within Hamming distance threshold, sorted by closeness."""
     if not image_hash:
         return []
@@ -144,7 +144,7 @@ def add_known_image(image_hash: str, url: str, title: str, category: str = "phis
 def reverse_search(image_bytes: bytes) -> dict:
     """Full reverse-search pipeline. Returns response matching frontend contract."""
     h = compute_dhash(image_bytes)
-    matches = search_hash(h, max_distance=10)
+    matches = search_hash(h, max_distance=6)
     found = len(matches) > 0
 
     risk_indicators: list[str] = []
