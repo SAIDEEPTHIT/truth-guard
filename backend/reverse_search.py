@@ -24,21 +24,30 @@ logger = logging.getLogger(__name__)
 _DB_PATH = os.path.join(os.path.dirname(__file__), "phishing_hashes.json")
 
 # Some realistic-looking demo seeds (curated). hash -> source metadata.
+# Some realistic-looking demo seeds (curated). hash -> source metadata.
+# NOTE: use mid-entropy hashes so they don't accidentally match blank/uniform
+# images (an all-0 or all-f hash matches solid-color uploads).
 _DEFAULT_SEEDS: dict[str, dict] = {
-    # Example seed hashes — these are placeholders matched by Hamming distance.
-    "ffffffffffffffff": {
-        "url": "https://known-phish.example.com/login",
+    "9c3e7a1f5b2d8e64": {
+        "url": "https://known-phish.example.com/sbi-login",
         "title": "Fake SBI Banking Login Page",
         "category": "phishing",
         "first_seen": "2024-08-12",
         "reports": 42,
     },
-    "0000000000000000": {
+    "a1b2c3d4e5f60718": {
         "url": "https://catfish-profile.example.com/john-doe",
         "title": "Recycled Catfish Profile Picture",
         "category": "catfishing",
         "first_seen": "2024-03-04",
         "reports": 17,
+    },
+    "73c5a98e2f4b1d60": {
+        "url": "https://upi-scam.example.com/refund",
+        "title": "Fake UPI Refund Screenshot",
+        "category": "scam",
+        "first_seen": "2025-01-22",
+        "reports": 28,
     },
 }
 
