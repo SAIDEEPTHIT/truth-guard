@@ -1,5 +1,5 @@
 // TruthShield Background Service Worker (Manifest V3) — Enhanced v4.0
-// Supports: Text analysis, Image analysis, URL safety check, Auto Domain Warning
+// Supports: Text analysis, Screenshot OCR scam analysis, Reverse image search, URL safety check, Auto Domain Warning
 // Uses SHARED CLOUD BACKEND for global community protection
 
 importScripts('config.js');
@@ -15,8 +15,13 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["selection"],
   });
   chrome.contextMenus.create({
-    id: "truthshield-analyze-image",
-    title: "🖼️ Check if Image is AI-Generated",
+    id: "truthshield-screenshot-scan",
+    title: "📸 Read Screenshot Text & Check Scam Risk",
+    contexts: ["image"],
+  });
+  chrome.contextMenus.create({
+    id: "truthshield-reverse-image",
+    title: "🔎 Reverse Search Image Source",
     contexts: ["image"],
   });
   chrome.contextMenus.create({
@@ -69,21 +74,34 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     chrome.runtime.sendMessage({ type: "analysis_result", data: result }).catch(() => {});
   }
 
-  // ── Image Analysis ──
-  if (info.menuItemId === "truthshield-analyze-image" && info.srcUrl) {
+  // ── Screenshot OCR Scam Analysis ──
+  if (info.menuItemId === "truthshield-screenshot-scan" && info.srcUrl) {
     chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null, truthshield_mode: "image" });
     chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
 
-    const result = await analyzeImageFromURL(info.srcUrl);
+    const result = await analyzeScreenshotFromURL(info.srcUrl);
 
     chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false, truthshield_mode: "image" });
 
     const badgeColor =
-      result.classification === "Likely Authentic" ? "#22c55e" :
-      result.classification === "Likely AI-Generated" ? "#ef4444" : "#eab308";
+      result.classification === "Safe" || result.classification === "No Text" ? "#22c55e" :
+      result.classification === "High Risk" ? "#ef4444" : "#eab308";
     chrome.action.setBadgeText({ text: String(result.risk_score) });
     chrome.action.setBadgeBackgroundColor({ color: badgeColor });
 
+    chrome.runtime.sendMessage({ type: "analysis_result", data: result, mode: "image" }).catch(() => {});
+  }
+
+  // ── Reverse Image Source Search ──
+  if (info.menuItemId === "truthshield-reverse-image" && info.srcUrl) {
+    chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null, truthshield_mode: "image" });
+    chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
+
+    const result = await reverseSearchImageFromURL(info.srcUrl);
+
+    chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false, truthshield_mode: "image" });
+    chrome.action.setBadgeText({ text: String(result.risk_score) });
+    chrome.action.setBadgeBackgroundColor({ color: result.risk_score > 60 ? "#ef4444" : result.risk_score > 30 ? "#eab308" : "#22c55e" });
     chrome.runtime.sendMessage({ type: "analysis_result", data: result, mode: "image" }).catch(() => {});
   }
 
