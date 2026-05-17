@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from analyzer import analyze_text, analyze_image
+from screenshot_analyzer import extract_text_from_image, extract_urls
 from image_analyzer import (
     extract_exif_metadata,
     score_metadata,
@@ -200,6 +201,22 @@ class OCRAnalyzeRequest(BaseModel):
     filename: Optional[str] = None
 
 
+def _text_analysis_payload(text: str):
+    result = analyze_text(text)
+    return {
+        "riskScore": result.risk_score,
+        "classification": result.classification,
+        "scamType": result.scam_type,
+        "emotionalManipulation": result.emotional_manipulation,
+        "signals": result.signals,
+        "suspiciousPhrases": result.suspicious_phrases,
+        "highlightedText": result.highlighted_text,
+        "summary": result.summary,
+        "tips": result.tips,
+        "explanations": result.explanations,
+    }
+
+
 @app.post("/api/image/analyze-ocr")
 def analyze_ocr_endpoint(req: OCRAnalyzeRequest):
     """Run scam/phishing/manipulation detection on text extracted from an image.
@@ -223,20 +240,49 @@ def analyze_ocr_endpoint(req: OCRAnalyzeRequest):
             "tips": ["Try a higher-resolution image if you expected text.", "Crop tightly around the text area."],
         }
 
-    result = analyze_text(text)
     return {
         "extractedText": text,
         "hasText": True,
-        "riskScore": result.risk_score,
-        "classification": result.classification,
-        "scamType": result.scam_type,
-        "emotionalManipulation": result.emotional_manipulation,
-        "signals": result.signals,
-        "suspiciousPhrases": result.suspicious_phrases,
-        "highlightedText": result.highlighted_text,
-        "summary": result.summary,
-        "tips": result.tips,
-        "explanations": result.explanations,
+        "links": extract_urls(text),
+        **_text_analysis_payload(text),
+    }
+
+
+@app.post("/api/image/analyze-screenshot")
+async def analyze_screenshot_endpoint(file: UploadFile = File(...)):
+    """Extract text/links from a screenshot, then run TruthShield scam analysis."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    image_data = await file.read()
+    if len(image_data) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+
+    ocr = extract_text_from_image(image_data, file.content_type or "image/jpeg")
+    text = (ocr.get("text") or "").strip()
+    if not text:
+        return {
+            "extractedText": "",
+            "hasText": False,
+            "links": [],
+            "ocrConfidence": ocr.get("confidence", 0),
+            "ocrProvider": ocr.get("provider", "unavailable"),
+            "riskScore": 0,
+            "classification": "No Text",
+            "scamType": "Safe",
+            "emotionalManipulation": False,
+            "signals": {"ai_generated": 0, "scam_keywords": 0, "emotional_manipulation": 0},
+            "suspiciousPhrases": [],
+            "summary": ocr.get("error") or "No readable text was found in the image.",
+            "tips": ["Try a sharper screenshot.", "Crop around the message or link before uploading."],
+        }
+
+    return {
+        "extractedText": text,
+        "hasText": True,
+        "links": ocr.get("links") or extract_urls(text),
+        "ocrConfidence": ocr.get("confidence", 0),
+        "ocrProvider": ocr.get("provider", "unknown"),
+        **_text_analysis_payload(text),
     }
 
 
