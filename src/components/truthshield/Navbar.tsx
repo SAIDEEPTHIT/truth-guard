@@ -13,7 +13,7 @@ const Navbar = () => {
   const links = [
     { to: "/", label: "Home" },
     { to: "/analyze", label: "Analyze Text" },
-    { to: "/image-analysis", label: "Analyze Image" },
+    { to: "/image-analysis", label: "Screenshot Check" },
     { to: "/blocklist", label: "Blocklist" },
     { to: "/history", label: "History" },
     { to: "/dashboard", label: "Dashboard" },
