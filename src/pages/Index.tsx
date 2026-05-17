@@ -22,8 +22,8 @@ const features = [
   },
   {
     icon: ImageIcon,
-    title: "AI Image Detection",
-    desc: "Analyzes images for AI-generation indicators: dimension patterns, color uniformity, EXIF metadata, and pixel smoothness.",
+    title: "Screenshot & Image Source Checks",
+    desc: "Reads text and links from screenshots for scam risk, then checks image reuse/source clues with reverse-search signals.",
   },
   {
     icon: Eye,
@@ -83,7 +83,7 @@ const Landing = () => {
               <Link to="/image-analysis">
                 <Button size="lg" variant="outline" className="gap-2 px-8">
                   <ImageIcon className="w-5 h-5" />
-                  {seniorMode ? "Check a Photo" : "Analyze Image"}
+                  {seniorMode ? "Check a Screenshot" : "Screenshot Check"}
                 </Button>
               </Link>
             </div>
@@ -98,7 +98,7 @@ const Landing = () => {
           >
             {[
               { value: "90+", label: "Scam Patterns" },
-              { value: "25+", label: "AI Indicators" },
+              { value: "2", label: "Image Workflows" },
               { value: "23+", label: "India-Specific" },
               { value: "100%", label: "Explainable" },
             ].map((stat, i) => (

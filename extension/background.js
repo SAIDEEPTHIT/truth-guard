@@ -1,5 +1,5 @@
 // TruthShield Background Service Worker (Manifest V3) — Enhanced v4.0
-// Supports: Text analysis, Image analysis, URL safety check, Auto Domain Warning
+// Supports: Text analysis, Screenshot OCR scam analysis, Reverse image search, URL safety check, Auto Domain Warning
 // Uses SHARED CLOUD BACKEND for global community protection
 
 importScripts('config.js');
@@ -15,8 +15,13 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["selection"],
   });
   chrome.contextMenus.create({
-    id: "truthshield-analyze-image",
-    title: "🖼️ Check if Image is AI-Generated",
+    id: "truthshield-screenshot-scan",
+    title: "📸 Read Screenshot Text & Check Scam Risk",
+    contexts: ["image"],
+  });
+  chrome.contextMenus.create({
+    id: "truthshield-reverse-image",
+    title: "🔎 Reverse Search Image Source",
     contexts: ["image"],
   });
   chrome.contextMenus.create({
@@ -69,21 +74,34 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     chrome.runtime.sendMessage({ type: "analysis_result", data: result }).catch(() => {});
   }
 
-  // ── Image Analysis ──
-  if (info.menuItemId === "truthshield-analyze-image" && info.srcUrl) {
+  // ── Screenshot OCR Scam Analysis ──
+  if (info.menuItemId === "truthshield-screenshot-scan" && info.srcUrl) {
     chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null, truthshield_mode: "image" });
     chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
 
-    const result = await analyzeImageFromURL(info.srcUrl);
+    const result = await analyzeScreenshotFromURL(info.srcUrl);
 
     chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false, truthshield_mode: "image" });
 
     const badgeColor =
-      result.classification === "Likely Authentic" ? "#22c55e" :
-      result.classification === "Likely AI-Generated" ? "#ef4444" : "#eab308";
+      result.classification === "Safe" || result.classification === "No Text" ? "#22c55e" :
+      result.classification === "High Risk" ? "#ef4444" : "#eab308";
     chrome.action.setBadgeText({ text: String(result.risk_score) });
     chrome.action.setBadgeBackgroundColor({ color: badgeColor });
 
+    chrome.runtime.sendMessage({ type: "analysis_result", data: result, mode: "image" }).catch(() => {});
+  }
+
+  // ── Reverse Image Source Search ──
+  if (info.menuItemId === "truthshield-reverse-image" && info.srcUrl) {
+    chrome.storage.local.set({ truthshield_loading: true, truthshield_result: null, truthshield_mode: "image" });
+    chrome.runtime.sendMessage({ type: "analysis_start" }).catch(() => {});
+
+    const result = await reverseSearchImageFromURL(info.srcUrl);
+
+    chrome.storage.local.set({ truthshield_result: result, truthshield_loading: false, truthshield_mode: "image" });
+    chrome.action.setBadgeText({ text: String(result.risk_score) });
+    chrome.action.setBadgeBackgroundColor({ color: result.risk_score > 60 ? "#ef4444" : result.risk_score > 30 ? "#eab308" : "#22c55e" });
     chrome.runtime.sendMessage({ type: "analysis_result", data: result, mode: "image" }).catch(() => {});
   }
 
@@ -368,253 +386,123 @@ function analyzeStylometry(text) {
   return { score: Math.min(40, score), indicators };
 }
 
-// ── Image Analysis (from URL) ──
+// ── Screenshot OCR + Reverse Image Search (from URL) ──
 
-async function analyzeImageFromURL(imageUrl) {
-  const indicators = [];
-  let score = 0;
-  const metadata = {};
+async function imageUrlToBlob(imageUrl) {
+  const response = await fetch(imageUrl, { credentials: "omit" });
+  if (!response.ok) throw new Error(`Could not fetch image: ${response.status}`);
+  return await response.blob();
+}
 
-  metadata["Source URL"] = imageUrl.length > 80 ? imageUrl.substring(0, 77) + "..." : imageUrl;
-
-  // Try enhanced backend endpoint first
+async function analyzeScreenshotFromURL(imageUrl) {
   try {
-    const imgResponse = await fetch(imageUrl);
-    const blob = await imgResponse.blob();
+    const blob = await imageUrlToBlob(imageUrl);
     const formData = new FormData();
-    formData.append("file", blob, "image.jpg");
+    formData.append("file", blob, "screenshot-image");
 
-    const apiRes = await fetch(`${API_URL}/api/image/analyze-full`, {
+    const apiRes = await fetch(`${API_URL}/api/image/analyze-screenshot`, {
       method: "POST",
       body: formData,
     });
-    if (apiRes.ok) {
-      const apiResult = await apiRes.json();
-      // Map enhanced result to extension format
-      const allIndicators = [];
-      if (apiResult.metadataIndicators) {
-        apiResult.metadataIndicators.forEach(ind => {
-          allIndicators.push(`${ind.type === "green" ? "✅" : ind.type === "red" ? "🔴" : "⚠️"} ${ind.signal}`);
-        });
-      }
-      if (apiResult.pixelAnalysis && apiResult.pixelAnalysis.indicators) {
-        apiResult.pixelAnalysis.indicators.forEach(ind => {
-          allIndicators.push(`${ind.type === "green" ? "✅" : ind.type === "red" ? "🔴" : "⚠️"} ${ind.signal}`);
-        });
-      }
-      if (apiResult.flags) {
-        apiResult.flags.forEach(f => {
-          allIndicators.push(`${f.severity === "high" ? "🔴" : "⚠️"} ${f.label}: ${f.detail}`);
-        });
-      }
+    if (!apiRes.ok) throw new Error(`Server error: ${apiRes.status}`);
+    const d = await apiRes.json();
 
-      const enhancedMetadata = {};
-      if (apiResult.metadata) {
-        if (apiResult.metadata.width) enhancedMetadata["Dimensions"] = `${apiResult.metadata.width} × ${apiResult.metadata.height}`;
-        if (apiResult.metadata.fileSizeMB) enhancedMetadata["File Size"] = `${apiResult.metadata.fileSizeMB} MB`;
-        if (apiResult.metadata.cameraMake) enhancedMetadata["Camera"] = `${apiResult.metadata.cameraMake} ${apiResult.metadata.cameraModel || ""}`;
-        if (apiResult.metadata.software) enhancedMetadata["Software"] = apiResult.metadata.software;
-        if (apiResult.metadata.creationDate) enhancedMetadata["Created"] = apiResult.metadata.creationDate;
-        enhancedMetadata["EXIF"] = apiResult.metadata.hasMissingEXIF ? "❌ Missing" : "✅ Present";
-      }
-      enhancedMetadata["Source URL"] = metadata["Source URL"];
-
-      return {
-        risk_score: apiResult.riskScore,
-        classification: apiResult.classification === "Inconclusive" ? "Possibly AI-Generated" : apiResult.classification,
-        indicators: allIndicators.length > 0 ? allIndicators : ["Analysis complete — no strong indicators found"],
-        metadata: enhancedMetadata,
-        tips: apiResult.tips || ["AI detection is probabilistic — no tool is 100% accurate."],
-        type: "image",
-        enhanced: true,
-        confidence: apiResult.confidence,
-        recommendation: apiResult.recommendation,
-        aiScore: apiResult.aiDetection ? apiResult.aiDetection.score : 0,
-        aiAvailable: apiResult.aiDetection ? apiResult.aiDetection.available : false,
-      };
-    }
-  } catch (e) {
-    // Fall through to legacy analysis
-  }
-
-  // Try legacy backend endpoint
-  try {
-    const response = await fetch(imageUrl);
-    const blob = await response.blob();
-    const formData = new FormData();
-    formData.append("file", blob, "image.jpg");
-
-    const apiRes = await fetch(`${API_URL}/analyze-image`, {
-      method: "POST",
-      body: formData,
-    });
-    if (apiRes.ok) {
-      const apiResult = await apiRes.json();
-      return {
-        risk_score: apiResult.risk_score,
-        classification: apiResult.classification,
-        indicators: apiResult.explanation.map(e => e.signal),
-        metadata: apiResult.metadata,
-        tips: apiResult.tips,
-        type: "image",
-      };
-    }
-  } catch (e) {
-    // Fall through to local analysis
-  }
-
-  // Local heuristic fallback
-  try {
-    const response = await fetch(imageUrl);
-    const blob = await response.blob();
-    metadata["File Size"] = (blob.size / 1024).toFixed(1) + " KB";
-    metadata["MIME Type"] = blob.type || "unknown";
-
-    if (blob.size > 5 * 1024 * 1024) {
-      score -= 5;
-      indicators.push("✅ Large file size — uncommon for AI images.");
-    } else if (blob.size < 200 * 1024 && blob.type.includes("jpeg")) {
-      score += 8;
-      indicators.push("Small JPEG — AI outputs are often compressed.");
-    }
-
-    if (blob.type.includes("png")) { score += 5; indicators.push("PNG format — commonly used by AI generators."); }
-    if (blob.type.includes("webp")) { score += 5; indicators.push("WebP format — often used in AI pipelines."); }
-
-    // EXIF check
-    const buffer = await blob.slice(0, 65536).arrayBuffer();
-    const view = new Uint8Array(buffer);
-    let hasExif = false;
-    for (let i = 0; i < view.length - 1; i++) {
-      if (view[i] === 0xFF && view[i + 1] === 0xE1) { hasExif = true; break; }
-    }
-    if (!hasExif) {
-      score += 15;
-      indicators.push("No EXIF metadata — AI images lack camera data.");
-    } else {
-      score -= 15;
-      indicators.push("✅ EXIF metadata present — suggests real camera.");
-    }
-
-    // Pixel analysis
-    const imgBitmap = await createImageBitmap(blob);
-    metadata["Dimensions"] = `${imgBitmap.width} × ${imgBitmap.height}`;
-
-    const aiDims = [[512,512],[768,768],[1024,1024],[1024,768],[768,1024],[1920,1080],[1344,768],[768,1344],[2048,2048],[1536,1536],[896,1152],[1152,896]];
-    if (aiDims.some(([w,h]) => imgBitmap.width === w && imgBitmap.height === h)) {
-      score += 18;
-      indicators.push(`Dimensions (${imgBitmap.width}×${imgBitmap.height}) match AI generator sizes.`);
-    }
-
-    if (imgBitmap.width % 64 === 0 && imgBitmap.height % 64 === 0) {
-      score += 10;
-      indicators.push("Dimensions are multiples of 64 — AI model alignment.");
-    }
-
-    if (imgBitmap.width === imgBitmap.height && imgBitmap.width >= 512) {
-      score += 8;
-      indicators.push("Perfect square — common in AI images.");
-    }
-
-    const canvas = new OffscreenCanvas(Math.min(imgBitmap.width, 256), Math.min(imgBitmap.height, 256));
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(imgBitmap, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const pixels = imageData.data;
-    const totalPx = canvas.width * canvas.height;
-
-    // Color histogram
-    const histogram = new Array(256).fill(0);
-    for (let i = 0; i < pixels.length; i += 4) {
-      const gray = Math.round(0.299 * pixels[i] + 0.587 * pixels[i+1] + 0.114 * pixels[i+2]);
-      histogram[gray]++;
-    }
-    if (Math.max(...histogram) / totalPx > 0.12) {
-      score += 12;
-      indicators.push("Unusual color uniformity.");
-    }
-
-    let emptyBins = 0;
-    for (let i = 10; i < 245; i++) { if (histogram[i] === 0) emptyBins++; }
-    if (emptyBins < 15 && totalPx > 10000) {
-      score += 10;
-      indicators.push("Very smooth color distribution — AI images rarely have histogram gaps.");
-    }
-
-    // Smooth transitions
-    let smooth = 0, total = 0;
-    for (let i = 4; i < pixels.length; i += 4) {
-      const diff = Math.abs(pixels[i]-pixels[i-4]) + Math.abs(pixels[i+1]-pixels[i-3]) + Math.abs(pixels[i+2]-pixels[i-2]);
-      if (diff < 8) smooth++;
-      total++;
-    }
-    if (total > 0 && smooth/total > 0.65) {
-      score += 14;
-      indicators.push("High smooth transitions — characteristic of AI imagery.");
-    }
-
-    // Sharp edges
-    let sharpEdges = 0;
-    for (let i = 4; i < pixels.length; i += 4) {
-      const diff = Math.abs(pixels[i]-pixels[i-4]) + Math.abs(pixels[i+1]-pixels[i-3]) + Math.abs(pixels[i+2]-pixels[i-2]);
-      if (diff > 80) sharpEdges++;
-    }
-    if (total > 0 && sharpEdges/total < 0.03) {
-      score += 10;
-      indicators.push("Very few sharp edges — AI has smoother boundaries.");
-    }
-
-    // Channel correlation
-    let meanR = 0, meanG = 0, meanB = 0;
-    for (let i = 0; i < pixels.length; i += 4) { meanR += pixels[i]; meanG += pixels[i+1]; meanB += pixels[i+2]; }
-    meanR /= totalPx; meanG /= totalPx; meanB /= totalPx;
-    let sRG = 0, sR2 = 0, sG2 = 0;
-    for (let i = 0; i < pixels.length; i += 4) {
-      const dr = pixels[i]-meanR, dg = pixels[i+1]-meanG;
-      sRG += dr*dg; sR2 += dr*dr; sG2 += dg*dg;
-    }
-    const corr = sR2 > 0 && sG2 > 0 ? Math.abs(sRG / Math.sqrt(sR2 * sG2)) : 0;
-    if (corr > 0.92) {
-      score += 12;
-      indicators.push("Extremely high color channel correlation — typical of AI.");
-    }
-
-    // Noise uniformity
-    const noiseVals = [];
-    for (let i = 4; i < pixels.length; i += 4) noiseVals.push(Math.abs(pixels[i]-pixels[i-4]));
-    if (noiseVals.length > 100) {
-      const nm = noiseVals.reduce((a,b)=>a+b,0)/noiseVals.length;
-      const nv = noiseVals.reduce((s,v)=>s+Math.pow(v-nm,2),0)/noiseVals.length;
-      if (Math.sqrt(nv) < 5 && nm < 8) {
-        score += 12;
-        indicators.push("Unnaturally uniform noise — hallmark of AI generation.");
-      }
-    }
-
+    return {
+      type: "image",
+      image_mode: "screenshot_ocr",
+      risk_score: d.riskScore || 0,
+      classification: d.classification || (d.hasText ? "Suspicious" : "No Text"),
+      extracted_text: d.extractedText || "",
+      links: d.links || [],
+      indicators: (d.suspiciousPhrases || []).map(p => `⚠️ ${p}`),
+      explanations: d.explanations || [],
+      signals: d.signals || { ai_generated: 0, scam_keywords: 0, emotional_manipulation: 0 },
+      highlighted_text: d.highlightedText || d.extractedText || "",
+      metadata: {
+        "Mode": "Screenshot text/link scan",
+        "OCR Provider": d.ocrProvider || "unknown",
+        "OCR Confidence": `${d.ocrConfidence || 0}%`,
+        "Source URL": imageUrl.length > 80 ? imageUrl.substring(0, 77) + "..." : imageUrl,
+      },
+      summary: d.summary || "Screenshot analysis complete.",
+      tips: d.tips || ["Verify the sender using an official app or website.", "Never share OTP, UPI PIN, Aadhaar, PAN, or passwords."],
+    };
   } catch (err) {
-    indicators.push("Could not fully analyze image (CORS restriction).");
-    score += 10;
+    return {
+      type: "image",
+      image_mode: "screenshot_ocr",
+      risk_score: 30,
+      classification: "Suspicious",
+      extracted_text: "",
+      links: [],
+      indicators: ["Could not extract screenshot text. The site may block image access."],
+      explanations: [{ category: "scam", phrase: "image access", reason: String(err), severity: "medium" }],
+      signals: { ai_generated: 0, scam_keywords: 30, emotional_manipulation: 0 },
+      highlighted_text: "No text extracted.",
+      metadata: { "Mode": "Screenshot text/link scan", "Source URL": imageUrl },
+      summary: "TruthShield could not read this image automatically. Try saving/uploading the screenshot in the web app.",
+      tips: ["Open TruthShield and upload the screenshot directly.", "Crop around the message text for better OCR."],
+    };
   }
+}
 
-  // URL pattern check
-  const aiUrlPatterns = /\b(dalle|midjourney|stable.?diffusion|comfyui|generated|ai[_-]|artificial|deepfake|flux|leonardo)\b/i;
-  if (aiUrlPatterns.test(imageUrl)) {
-    score += 25;
-    indicators.push("URL contains AI tool references.");
+async function reverseSearchImageFromURL(imageUrl) {
+  try {
+    const blob = await imageUrlToBlob(imageUrl);
+    const formData = new FormData();
+    formData.append("file", blob, "source-image");
+
+    const apiRes = await fetch(`${API_URL}/api/image/reverse-search`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!apiRes.ok) throw new Error(`Server error: ${apiRes.status}`);
+    const d = await apiRes.json();
+    const sources = d.sources || [];
+
+    return {
+      type: "image",
+      image_mode: "reverse_search",
+      risk_score: d.riskScore || 0,
+      classification: d.found ? "Suspicious" : "Safe",
+      indicators: d.riskIndicators || [],
+      explanations: sources.map(s => ({
+        category: s.isSuspicious ? "scam" : "ai",
+        phrase: s.title || s.url || "matched source",
+        reason: `${s.category || "source"} match${typeof s.confidence === "number" ? ` (${Math.round(s.confidence * 100)}%)` : ""}`,
+        severity: s.isSuspicious ? "high" : "medium",
+      })),
+      signals: { ai_generated: 0, scam_keywords: d.found ? Math.min(100, d.riskScore || 0) : 0, emotional_manipulation: 0 },
+      highlighted_text: sources.length
+        ? sources.map(s => `${s.title || "Known source"}: ${s.url || "local database"}`).join("\n")
+        : "No matching source found in the TruthShield known-image database.",
+      metadata: {
+        "Mode": "Reverse image source search",
+        "Image Hash": d.imageHash || "—",
+        "Algorithm": d.hashAlgorithm || "dHash-64",
+        "Matches": String(d.matchCount || 0),
+        "Source URL": imageUrl.length > 80 ? imageUrl.substring(0, 77) + "..." : imageUrl,
+      },
+      summary: d.found
+        ? `Found ${d.matchCount || sources.length} matching source(s). Review before trusting this image.`
+        : "No known scam/reused source match found in TruthShield's local database. Use Google Lens for wider web verification.",
+      tips: ["Use Google Lens/TinEye for public web source discovery.", "Do not trust reposted images without checking the original context."],
+    };
+  } catch (err) {
+    return {
+      type: "image",
+      image_mode: "reverse_search",
+      risk_score: 20,
+      classification: "Safe",
+      indicators: ["Reverse search unavailable for this image."],
+      explanations: [{ category: "scam", phrase: "reverse search", reason: String(err), severity: "low" }],
+      signals: { ai_generated: 0, scam_keywords: 0, emotional_manipulation: 0 },
+      highlighted_text: "No source result available.",
+      metadata: { "Mode": "Reverse image source search", "Source URL": imageUrl },
+      summary: "TruthShield could not reverse-search this image automatically.",
+      tips: ["Try uploading the image in the TruthShield web app.", "Use Google Lens if you need a wider public web search."],
+    };
   }
-
-  score = Math.max(0, Math.min(100, score));
-  const classification = score <= 25 ? "Likely Authentic" : score <= 50 ? "Possibly AI-Generated" : "Likely AI-Generated";
-
-  const tips = [];
-  if (score > 25) {
-    tips.push("Use Google Reverse Image Search to verify.");
-    tips.push("Look for artifacts: irregular fingers, asymmetric details, blurred text.");
-    tips.push("Check source credibility.");
-  }
-  tips.push("AI detection is probabilistic — no tool is 100% accurate.");
-
-  return { risk_score: score, classification, indicators, metadata, tips, type: "image" };
 }
 
 // ── URL Safety Analysis ──
