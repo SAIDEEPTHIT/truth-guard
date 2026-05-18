@@ -680,6 +680,9 @@ def analyze_text(text: str) -> AnalysisResult:
         })
 
     summary = result.get("explanation", "") or "Analysis complete."
+    senior = (result.get("senior_explanation") or "").strip()
+    if senior:
+        summary = f"{summary}\n\nFor seniors: {senior}"
     sources = result.get("_sources", ["heuristic"])
     pattern = result.get("_pattern")
     if len(sources) > 1 or pattern:
@@ -690,7 +693,12 @@ def analyze_text(text: str) -> AnalysisResult:
             meta_parts.append(f"contextual pattern: {pattern}")
         summary = f"{summary}\n\n[Engine: {' • '.join(meta_parts)}]"
 
-    tips = result.get("tips") or ["Stay vigilant and verify sources."]
+    tips = list(result.get("tips") or [])
+    susp_urls = result.get("suspicious_urls") or []
+    if susp_urls:
+        tips.insert(0, f"Suspicious links/domains: {', '.join(susp_urls[:3])}")
+    if not tips:
+        tips = ["Stay vigilant and verify sources."]
 
     return AnalysisResult(
         risk_score=risk,
