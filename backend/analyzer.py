@@ -531,6 +531,18 @@ def _fuse(results: list) -> dict:
     explanations_pool = [r.get("explanation", "") for r in results if r.get("explanation")]
     explanation = max(explanations_pool, key=len) if explanations_pool else ""
 
+    # Senior-friendly explanation: pick first non-empty
+    senior = next((r.get("senior_explanation", "") for r in results if r.get("senior_explanation")), "")
+
+    # Suspicious URLs (merge unique)
+    seen_u, susp_urls = set(), []
+    for r in results:
+        for u in r.get("suspicious_urls", []) or []:
+            k = str(u).lower().strip()
+            if k and k not in seen_u:
+                seen_u.add(k)
+                susp_urls.append(u)
+
     # Merge tips (deduped)
     seen_t, tips = set(), []
     for r in results:
@@ -553,7 +565,9 @@ def _fuse(results: list) -> dict:
         "emotional_manipulation": emotional,
         "ai_generated_probability": ai_prob,
         "suspicious_phrases": phrases,
+        "suspicious_urls": susp_urls,
         "explanation": explanation,
+        "senior_explanation": senior,
         "tips": tips,
         "_sources": [r.get("_source", "llm") for r in results],
     }
