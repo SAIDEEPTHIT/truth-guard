@@ -55,18 +55,64 @@ const ImageAnalyzer = () => {
   const { seniorMode } = useSeniorMode();
 
   const analyzeScreenshot = async (f: File): Promise<ScreenshotResult> => {
-    const form = new FormData();
-    form.append("file", f);
-
+    // 1. Try backend OCR (Gemini vision) first.
     try {
+      const form = new FormData();
+      form.append("file", f);
       const serverRes = await fetch(`${API_BASE}/api/image/analyze-screenshot`, { method: "POST", body: form });
       if (serverRes.ok) {
         const d = await serverRes.json();
+        if (d.hasText && (d.extractedText || "").trim().length > 0) {
+          return {
+            loading: false,
+            hasText: true,
+            extractedText: d.extractedText || "",
+            confidence: d.ocrConfidence || 0,
+            riskScore: d.riskScore,
+            classification: d.classification,
+            scamType: d.scamType,
+            emotionalManipulation: d.emotionalManipulation,
+            signals: d.signals,
+            suspiciousPhrases: d.suspiciousPhrases,
+            summary: d.summary,
+            tips: d.tips,
+            links: d.links || [],
+            urlAnalysis: (d.links || []).map((url: string) => analyzeURL(url)),
+            ocrProvider: d.ocrProvider,
+          };
+        }
+      }
+    } catch {
+      // network error / endpoint missing → fall through to browser OCR
+    }
+
+    // 2. Browser Tesseract.js fallback (with grayscale + contrast preprocessing).
+    const ocr = await extractTextFromImage(f);
+    const extractedText = ocr.text.trim();
+    if (!extractedText) {
+      return {
+        loading: false,
+        hasText: false,
+        extractedText: "",
+        confidence: ocr.confidence,
+        error: "No readable text found. Try a sharper screenshot or crop tightly around the message.",
+      };
+    }
+
+    // 3. Send extracted text to backend /api/image/analyze-ocr (Gemini text analysis).
+    try {
+      const res = await fetch(`${API_BASE}/api/image/analyze-ocr`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: extractedText, filename: f.name }),
+      });
+      if (res.ok) {
+        const d = await res.json();
         return {
           loading: false,
-          hasText: !!d.hasText,
-          extractedText: d.extractedText || "",
-          confidence: d.ocrConfidence || 0,
+          hasText: true,
+          extractedText,
+          confidence: ocr.confidence,
           riskScore: d.riskScore,
           classification: d.classification,
           scamType: d.scamType,
@@ -77,23 +123,11 @@ const ImageAnalyzer = () => {
           tips: d.tips,
           links: d.links || [],
           urlAnalysis: (d.links || []).map((url: string) => analyzeURL(url)),
-          ocrProvider: d.ocrProvider,
+          ocrProvider: "browser:tesseract",
         };
       }
     } catch {
-      // Deployed backend may not yet have the new OCR endpoint; use browser OCR fallback.
-    }
-
-    const ocr = await extractTextFromImage(f);
-    const extractedText = ocr.text.trim();
-    if (!extractedText) {
-      return {
-        loading: false,
-        hasText: false,
-        extractedText: "",
-        confidence: ocr.confidence,
-        error: "No readable text found. Try a sharper screenshot or crop around the message.",
-      };
+      // backend unreachable → fall back to local heuristic analyzer
     }
 
     const analysis = analyzeText(extractedText);

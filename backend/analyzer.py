@@ -40,12 +40,12 @@ logger = logging.getLogger(__name__)
 
 _openai_client = None
 
-GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.0-flash")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-1.5-flash")
 GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def _gemini_text_model_candidates() -> list[str]:
-    candidates = [GEMINI_TEXT_MODEL, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    candidates = [GEMINI_TEXT_MODEL, "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash-latest"]
     seen = set()
     return [m for m in candidates if m and not (m in seen or seen.add(m))]
 
@@ -239,31 +239,49 @@ CONTEXTUAL_PATTERNS = [
 ]
 
 
-# ── OpenAI prompt (structured) ────────────────────────────────────────────────
+# ── OpenAI / Gemini prompt (structured) ───────────────────────────────────────
 
 SYSTEM_PROMPT = """You are TruthShield's senior cybersecurity analyst specialising in scams targeting Indian users.
+
+Classify the text into ONE of these scam categories (use exact label):
+  - "Phishing"               (fake login / verify-account / fake bank or govt link)
+  - "Fake Banking Alert"     (impersonation of SBI/HDFC/ICICI/RBI/UPI alerts)
+  - "KYC Scam"               (fake KYC update, Aadhaar/PAN block, eKYC expiry)
+  - "Urgency / Fear Tactic"  (act-now, account-blocked, arrest-warrant pressure)
+  - "OTP / Payment Scam"     (asks to share OTP, UPI PIN, autopay, ₹1 verify)
+  - "Fake Rewards"           (you-won, lottery, cashback, free gift, prize)
+  - "Impersonation Scam"     (CBI/police/FedEx/courier/customs/celeb impersonation)
+  - "AI Generated"           (clearly LLM-written marketing / essay, not a scam)
+  - "Safe"                   (legitimate / benign content)
+
+Also detect suspicious URLs/domains in the text: shorteners (bit.ly, tinyurl, t.co),
+look-alike banking domains (sbi-secure-xxx, hdfc-verify-xxx), non-https links to
+"banks", IP-address URLs, or recently-registered look-alikes — call these out.
 
 Calibrate scores realistically. Do NOT inflate scores for benign content.
 
 SCORING GUIDE (0-100 risk_score):
   0-15  → Casual/normal/educational text, no red flags
-  16-30 → Mildly promotional but legitimate marketing
-  31-50 → Suspicious tone or unverified claims (worth caution)
+  16-30 → Mildly promotional but legitimate
+  31-50 → Suspicious tone, unverified claims (worth caution)
   51-69 → Likely scam — multiple manipulation signals
-  70-85 → High-confidence scam (job-fee, lottery, urgent verify, etc.)
+  70-85 → High-confidence scam (job-fee, lottery, urgent verify)
   86-100 → Textbook fraud (OTP theft, courier-narcotics, bank phishing link)
 
-ALSO score `ai_generated_probability` 0-100 separately (corporate buzzwords, em-dashes, "delve into", "tapestry", overuse of transitional phrases all raise this).
+Also score `ai_generated_probability` 0-100 (corporate buzzwords, em-dashes,
+"delve into", "tapestry", overuse of transitions all raise this).
 
 Return STRICT JSON only:
 {
   "risk_score": <0-100>,
   "classification": "Safe" | "Suspicious" | "High Risk",
-  "scam_type": "Phishing" | "Job Scam" | "Financial Fraud" | "Misinformation" | "AI Generated" | "Safe",
+  "scam_type": "Phishing" | "Fake Banking Alert" | "KYC Scam" | "Urgency / Fear Tactic" | "OTP / Payment Scam" | "Fake Rewards" | "Impersonation Scam" | "AI Generated" | "Safe",
   "emotional_manipulation": <bool>,
   "ai_generated_probability": <0-100>,
   "suspicious_phrases": [<exact substrings copied from input>],
+  "suspicious_urls": [<exact URLs/domains from input that look risky>],
   "explanation": "<2-3 sentence WHY — describe the specific pattern detected and why it's dangerous (or safe). Be concrete.>",
+  "senior_explanation": "<1-2 short sentences, plain English, no jargon, suitable for a 65+ user. Example: 'This message pretends to be your bank to scare you. Do not click the link or share any OTP.'>",
   "tips": [<2-3 actionable, India-specific safety tips>]
 }"""
 
@@ -513,6 +531,18 @@ def _fuse(results: list) -> dict:
     explanations_pool = [r.get("explanation", "") for r in results if r.get("explanation")]
     explanation = max(explanations_pool, key=len) if explanations_pool else ""
 
+    # Senior-friendly explanation: pick first non-empty
+    senior = next((r.get("senior_explanation", "") for r in results if r.get("senior_explanation")), "")
+
+    # Suspicious URLs (merge unique)
+    seen_u, susp_urls = set(), []
+    for r in results:
+        for u in r.get("suspicious_urls", []) or []:
+            k = str(u).lower().strip()
+            if k and k not in seen_u:
+                seen_u.add(k)
+                susp_urls.append(u)
+
     # Merge tips (deduped)
     seen_t, tips = set(), []
     for r in results:
@@ -535,7 +565,9 @@ def _fuse(results: list) -> dict:
         "emotional_manipulation": emotional,
         "ai_generated_probability": ai_prob,
         "suspicious_phrases": phrases,
+        "suspicious_urls": susp_urls,
         "explanation": explanation,
+        "senior_explanation": senior,
         "tips": tips,
         "_sources": [r.get("_source", "llm") for r in results],
     }
@@ -648,6 +680,9 @@ def analyze_text(text: str) -> AnalysisResult:
         })
 
     summary = result.get("explanation", "") or "Analysis complete."
+    senior = (result.get("senior_explanation") or "").strip()
+    if senior:
+        summary = f"{summary}\n\nFor seniors: {senior}"
     sources = result.get("_sources", ["heuristic"])
     pattern = result.get("_pattern")
     if len(sources) > 1 or pattern:
@@ -658,7 +693,12 @@ def analyze_text(text: str) -> AnalysisResult:
             meta_parts.append(f"contextual pattern: {pattern}")
         summary = f"{summary}\n\n[Engine: {' • '.join(meta_parts)}]"
 
-    tips = result.get("tips") or ["Stay vigilant and verify sources."]
+    tips = list(result.get("tips") or [])
+    susp_urls = result.get("suspicious_urls") or []
+    if susp_urls:
+        tips.insert(0, f"Suspicious links/domains: {', '.join(susp_urls[:3])}")
+    if not tips:
+        tips = ["Stay vigilant and verify sources."]
 
     return AnalysisResult(
         risk_score=risk,

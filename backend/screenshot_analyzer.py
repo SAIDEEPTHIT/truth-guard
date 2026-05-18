@@ -21,12 +21,12 @@ import requests
 logger = logging.getLogger(__name__)
 
 GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-DEFAULT_GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.0-flash")
+DEFAULT_GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-1.5-flash")
 HF_OCR_MODEL = os.getenv("HUGGINGFACE_OCR_MODEL", "microsoft/trocr-base-printed")
 
 
 def _gemini_model_candidates() -> list[str]:
-    candidates = [DEFAULT_GEMINI_VISION_MODEL, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    candidates = [DEFAULT_GEMINI_VISION_MODEL, "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash-latest"]
     seen: set[str] = set()
     return [m for m in candidates if m and not (m in seen or seen.add(m))]
 
