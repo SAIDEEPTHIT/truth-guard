@@ -40,12 +40,12 @@ logger = logging.getLogger(__name__)
 
 _openai_client = None
 
-GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.0-flash")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-1.5-flash")
 GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def _gemini_text_model_candidates() -> list[str]:
-    candidates = [GEMINI_TEXT_MODEL, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
+    candidates = [GEMINI_TEXT_MODEL, "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash-latest"]
     seen = set()
     return [m for m in candidates if m and not (m in seen or seen.add(m))]
 
